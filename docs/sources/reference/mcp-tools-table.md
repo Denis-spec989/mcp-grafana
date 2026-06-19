@@ -112,6 +112,7 @@ The following table lists MCP tools, required RBAC permissions, and typical scop
 | `create_snapshot`                 | Snapshot       | Create a dashboard snapshot from a full dashboard payload                                                    | `dashboards:write`                                     | `dashboards:*` or `dashboards:uid:abc123`           |
 | `delete_snapshot`                 | Snapshot       | Delete a dashboard snapshot by snapshot key                                                                  | `dashboards:write`                                     | `dashboards:*` or `dashboards:uid:abc123`           |
 | `get_panel_image`                 | Rendering      | Render a stored dashboard or panel — or a provisioning preview from a repository branch — as a PNG image     | `dashboards:read`                                      | `dashboards:uid:abc123`                             |
+| `get_panel_image_and_save`        | Rendering      | Render a dashboard or panel as a PNG image and save it to a file on the server (write tool)                  | `dashboards:read`                                      | `dashboards:uid:abc123`                             |
 | `list_provisioning_repositories`  | Provisioning   | List provisioning repositories (e.g. git-sync sources) with their source URL, branch, sync state, and health | `provisioning.repositories:read`                       | N/A                                                 |
 | `validate_provisioning_file`      | Provisioning   | Dry-run-apply a file from a provisioning repository and report admission validation errors                   | `provisioning.repositories:read`                       | N/A                                                 |
 
@@ -191,7 +192,9 @@ You can limit which tools the server exposes with `--enabled-tools`, `--disable-
 
 ## Panel and dashboard images
 
-`get_panel_image` needs the [Grafana Image Renderer](https://grafana.com/docs/grafana/latest/setup-grafana/image-rendering/) service installed and configured in Grafana.
+`get_panel_image` and `get_panel_image_and_save` need the [Grafana Image Renderer](https://grafana.com/docs/grafana/latest/setup-grafana/image-rendering/) service installed and configured in Grafana.
+
+`get_panel_image_and_save` writes the rendered PNG to a file on the machine running the MCP server (you supply `directory` and `filename`) and returns the absolute path instead of the image bytes. It is a write tool, so it is disabled when the server runs with `--disable-write`. Because it writes to the server's local filesystem, it is intended for the local stdio transport rather than a shared remote server.
 
 ## Next steps
 

@@ -1,13 +1,18 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"image"
+	_ "image/png" // register the PNG decoder for image.DecodeConfig
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -96,6 +101,31 @@ type ProvisioningPreview struct {
 }
 
 func getPanelImage(ctx context.Context, args GetPanelImageParams) (*mcp.CallToolResult, error) {
+	imageData, err := renderPanelImage(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+
+	// Return the image as base64 encoded data using MCP's image content type
+	base64Data := base64.StdEncoding.EncodeToString(imageData)
+
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{
+			mcp.ImageContent{
+				Type:     "image",
+				Data:     base64Data,
+				MIMEType: "image/png",
+			},
+		},
+	}, nil
+}
+
+// renderPanelImage builds the render URL, executes the HTTP request through the
+// shared middleware chain (TLS, auth, extra headers, org ID, user-agent, otel),
+// and returns the raw PNG bytes. Shared by getPanelImage (which base64-encodes
+// the bytes into MCP image content) and getPanelImageAndSave (which writes them
+// to the filesystem).
+func renderPanelImage(ctx context.Context, args GetPanelImageParams) ([]byte, error) {
 	config := mcpgrafana.GrafanaConfigFromContext(ctx)
 	baseURL := config.URL
 
@@ -160,18 +190,7 @@ func getPanelImage(ctx context.Context, args GetPanelImageParams) (*mcp.CallTool
 		return nil, fmt.Errorf("failed to read image data: %w", err)
 	}
 
-	// Return the image as base64 encoded data using MCP's image content type
-	base64Data := base64.StdEncoding.EncodeToString(imageData)
-
-	return &mcp.CallToolResult{
-		Content: []mcp.Content{
-			mcp.ImageContent{
-				Type:     "image",
-				Data:     base64Data,
-				MIMEType: "image/png",
-			},
-		},
-	}, nil
+	return imageData, nil
 }
 
 func buildRenderURL(baseURL string, args GetPanelImageParams) (string, error) {
@@ -293,6 +312,70 @@ var GetPanelImage = mcpgrafana.MustTool(
 	mcp.WithReadOnlyHintAnnotation(true),
 )
 
-func AddRenderingTools(mcp *server.MCPServer) {
+// GetPanelImageAndSaveParams extends the rendering parameters with a target
+// directory and filename. The embedded GetPanelImageParams is promoted to
+// top-level schema properties by the reflector (Anonymous + ExpandedStruct),
+// so callers pass dashboardUid/panelId/... alongside directory/filename.
+type GetPanelImageAndSaveParams struct {
+	GetPanelImageParams
+	Directory string `json:"directory" jsonschema:"required,description=Filesystem directory to save the PNG into. Created if it does not exist."`
+	Filename  string `json:"filename" jsonschema:"required,description=Output PNG file name (e.g. dashboard.png). Written as-is; an existing file is overwritten."`
+}
+
+func getPanelImageAndSave(ctx context.Context, args GetPanelImageAndSaveParams) (*mcp.CallToolResult, error) {
+	if args.Directory == "" {
+		return nil, fmt.Errorf("directory is required")
+	}
+	if args.Filename == "" {
+		return nil, fmt.Errorf("filename is required")
+	}
+
+	imageData, err := renderPanelImage(ctx, args.GetPanelImageParams)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := os.MkdirAll(args.Directory, 0o755); err != nil {
+		return nil, fmt.Errorf("failed to create directory: %w", err)
+	}
+
+	outPath := filepath.Join(args.Directory, args.Filename)
+	if err := os.WriteFile(outPath, imageData, 0o644); err != nil {
+		return nil, fmt.Errorf("failed to write image file: %w", err)
+	}
+
+	absPath, err := filepath.Abs(outPath)
+	if err != nil {
+		absPath = outPath
+	}
+
+	// Best-effort: report the actual rendered dimensions decoded from the PNG.
+	// A decode failure must not fail the write that already succeeded.
+	dims := ""
+	if cfg, _, derr := image.DecodeConfig(bytes.NewReader(imageData)); derr == nil {
+		dims = fmt.Sprintf("%dx%d, ", cfg.Width, cfg.Height)
+	}
+
+	return mcp.NewToolResultText(
+		fmt.Sprintf("Saved panel image to:\n%s\n(image/png, %s%d bytes)", absPath, dims, len(imageData)),
+	), nil
+}
+
+var GetPanelImageAndSave = mcpgrafana.MustTool(
+	"get_panel_image_and_save",
+	"Render a Grafana dashboard panel or full dashboard as a PNG image and save it to a file on the server's local filesystem. "+
+		"Accepts the same rendering options as get_panel_image (dashboardUid or provisioningPreview, panelId, time range, variables, theme, scale). "+
+		"Provide directory and filename; the directory is created if missing and an existing file is overwritten. "+
+		"Returns the absolute file path and image metadata (not the image bytes). Requires the Grafana Image Renderer service to be installed.",
+	getPanelImageAndSave,
+	mcp.WithTitleAnnotation("Get panel or dashboard image and save to file"),
+	mcp.WithIdempotentHintAnnotation(true),
+	mcp.WithReadOnlyHintAnnotation(false),
+)
+
+func AddRenderingTools(mcp *server.MCPServer, enableWriteTools bool) {
 	GetPanelImage.Register(mcp)
+	if enableWriteTools {
+		GetPanelImageAndSave.Register(mcp)
+	}
 }

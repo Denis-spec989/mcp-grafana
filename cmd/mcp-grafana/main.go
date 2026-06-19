@@ -186,7 +186,7 @@ func (dt *disabledTools) toolEntries() []toolEntry {
 		{tools.AddPyroscopeTools, dt.pyroscope, "pyroscope"},
 		{func(mcp *server.MCPServer) { tools.AddNavigationTools(mcp, enableWriteTools) }, dt.navigation, "navigation"},
 		{func(mcp *server.MCPServer) { tools.AddAnnotationTools(mcp, enableWriteTools) }, dt.annotations, "annotations"},
-		{tools.AddRenderingTools, dt.rendering, "rendering"},
+		{func(mcp *server.MCPServer) { tools.AddRenderingTools(mcp, enableWriteTools) }, dt.rendering, "rendering"},
 		{func(mcp *server.MCPServer) { tools.AddSnapshotTools(mcp, enableWriteTools) }, dt.snapshot, "snapshot"},
 		{tools.AddCloudWatchTools, dt.cloudwatch, "cloudwatch"},
 		{tools.AddExamplesTools, dt.examples, "examples"},

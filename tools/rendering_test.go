@@ -8,8 +8,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -18,6 +21,19 @@ import (
 
 func intPtr(i int) *int {
 	return &i
+}
+
+// testPNGData is a minimal valid 1x1 PNG, shared across rendering tests.
+var testPNGData = []byte{
+	0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // PNG signature
+	0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, // IHDR chunk
+	0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+	0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53,
+	0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41,
+	0x54, 0x08, 0xD7, 0x63, 0xF8, 0xFF, 0xFF, 0x3F,
+	0x00, 0x05, 0xFE, 0x02, 0xFE, 0xDC, 0xCC, 0x59,
+	0xE7, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E,
+	0x44, 0xAE, 0x42, 0x60, 0x82, // IEND chunk
 }
 
 func TestStringOrSlice_UnmarshalJSON(t *testing.T) {
@@ -475,19 +491,6 @@ func TestBuildRenderURL(t *testing.T) {
 }
 
 func TestGetPanelImage(t *testing.T) {
-	// Create a test PNG image (1x1 pixel)
-	testPNGData := []byte{
-		0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // PNG signature
-		0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, // IHDR chunk
-		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
-		0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53,
-		0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41,
-		0x54, 0x08, 0xD7, 0x63, 0xF8, 0xFF, 0xFF, 0x3F,
-		0x00, 0x05, 0xFE, 0x02, 0xFE, 0xDC, 0xCC, 0x59,
-		0xE7, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E,
-		0x44, 0xAE, 0x42, 0x60, 0x82, // IEND chunk
-	}
-
 	t.Run("Successful image render", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			assert.Contains(t, r.URL.Path, "/render/d/test-dash")
@@ -790,5 +793,147 @@ func TestGetPanelImage(t *testing.T) {
 		})
 
 		require.NoError(t, err)
+	})
+}
+
+func TestGetPanelImageAndSave(t *testing.T) {
+	// imageServer returns a stub renderer that always serves testPNGData.
+	imageServer := func() *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "image/png")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(testPNGData)
+		}))
+	}
+
+	ctxFor := func(url string) context.Context {
+		return mcpgrafana.WithGrafanaConfig(context.Background(), mcpgrafana.GrafanaConfig{
+			URL:    url,
+			APIKey: "test-api-key",
+		})
+	}
+
+	t.Run("Saves rendered image to file", func(t *testing.T) {
+		server := imageServer()
+		defer server.Close()
+
+		dir := t.TempDir()
+		result, err := getPanelImageAndSave(ctxFor(server.URL), GetPanelImageAndSaveParams{
+			GetPanelImageParams: GetPanelImageParams{DashboardUID: "test-dash"},
+			Directory:           dir,
+			Filename:            "panel.png",
+		})
+		require.NoError(t, err)
+		require.NotNil(t, result)
+
+		saved, err := os.ReadFile(filepath.Join(dir, "panel.png"))
+		require.NoError(t, err)
+		assert.Equal(t, testPNGData, saved)
+
+		require.Len(t, result.Content, 1)
+		text, ok := result.Content[0].(mcp.TextContent)
+		require.True(t, ok)
+		assert.Contains(t, text.Text, "panel.png")
+		assert.Contains(t, text.Text, "image/png")
+		assert.Contains(t, text.Text, "1x1") // dimensions decoded from the PNG
+		assert.Contains(t, text.Text, "bytes")
+	})
+
+	t.Run("Creates nested directories that do not exist", func(t *testing.T) {
+		server := imageServer()
+		defer server.Close()
+
+		dir := filepath.Join(t.TempDir(), "nested", "sub", "dir")
+		_, err := getPanelImageAndSave(ctxFor(server.URL), GetPanelImageAndSaveParams{
+			GetPanelImageParams: GetPanelImageParams{DashboardUID: "test-dash"},
+			Directory:           dir,
+			Filename:            "panel.png",
+		})
+		require.NoError(t, err)
+
+		saved, err := os.ReadFile(filepath.Join(dir, "panel.png"))
+		require.NoError(t, err)
+		assert.Equal(t, testPNGData, saved)
+	})
+
+	t.Run("Overwrites an existing file", func(t *testing.T) {
+		server := imageServer()
+		defer server.Close()
+
+		dir := t.TempDir()
+		outPath := filepath.Join(dir, "panel.png")
+		require.NoError(t, os.WriteFile(outPath, []byte("stale contents"), 0o644))
+
+		_, err := getPanelImageAndSave(ctxFor(server.URL), GetPanelImageAndSaveParams{
+			GetPanelImageParams: GetPanelImageParams{DashboardUID: "test-dash"},
+			Directory:           dir,
+			Filename:            "panel.png",
+		})
+		require.NoError(t, err)
+
+		saved, err := os.ReadFile(outPath)
+		require.NoError(t, err)
+		assert.Equal(t, testPNGData, saved)
+	})
+
+	t.Run("Passes render params through (panelId uses d-solo)", func(t *testing.T) {
+		var gotPath, gotPanelID string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotPath = r.URL.Path
+			gotPanelID = r.URL.Query().Get("panelId")
+			w.Header().Set("Content-Type", "image/png")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(testPNGData)
+		}))
+		defer server.Close()
+
+		_, err := getPanelImageAndSave(ctxFor(server.URL), GetPanelImageAndSaveParams{
+			GetPanelImageParams: GetPanelImageParams{DashboardUID: "test-dash", PanelID: intPtr(5)},
+			Directory:           t.TempDir(),
+			Filename:            "panel.png",
+		})
+		require.NoError(t, err)
+		assert.Contains(t, gotPath, "/render/d-solo/test-dash")
+		assert.Equal(t, "5", gotPanelID)
+	})
+
+	t.Run("Empty directory returns error", func(t *testing.T) {
+		_, err := getPanelImageAndSave(ctxFor("http://example.com"), GetPanelImageAndSaveParams{
+			GetPanelImageParams: GetPanelImageParams{DashboardUID: "test-dash"},
+			Directory:           "",
+			Filename:            "panel.png",
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "directory is required")
+	})
+
+	t.Run("Empty filename returns error", func(t *testing.T) {
+		_, err := getPanelImageAndSave(ctxFor("http://example.com"), GetPanelImageAndSaveParams{
+			GetPanelImageParams: GetPanelImageParams{DashboardUID: "test-dash"},
+			Directory:           t.TempDir(),
+			Filename:            "",
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "filename is required")
+	})
+
+	t.Run("Render error is propagated and no file is written", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte("Not Found"))
+		}))
+		defer server.Close()
+
+		dir := t.TempDir()
+		_, err := getPanelImageAndSave(ctxFor(server.URL), GetPanelImageAndSaveParams{
+			GetPanelImageParams: GetPanelImageParams{DashboardUID: "test-dash"},
+			Directory:           dir,
+			Filename:            "panel.png",
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "image renderer not available")
+
+		_, statErr := os.Stat(filepath.Join(dir, "panel.png"))
+		assert.True(t, os.IsNotExist(statErr))
 	})
 }
