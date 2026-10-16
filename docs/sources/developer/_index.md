@@ -1,7 +1,7 @@
 ---
 title: Developer
 menuTitle: Developer
-description: Build from source, run tests, use the Go SDK, and enable metrics and tracing.
+description: Build from source, run tests, use the Go SDK, and configure local metrics and logs.
 keywords:
   - Go
   - SDK

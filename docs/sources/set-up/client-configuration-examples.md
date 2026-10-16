@@ -490,5 +490,5 @@ Refer to [Server TLS (streamable-http)](../../configure/server-tls-streamable-ht
 ## Next steps
 
 - [Health check endpoint](../../configure/health-check-endpoint/)
-- [Observability (metrics and tracing)](../../developer/observability-metrics-and-tracing/)
+- [Observability (local metrics and logs)](../../developer/observability-metrics-and-tracing/)
 - [Troubleshooting](../../troubleshooting/)

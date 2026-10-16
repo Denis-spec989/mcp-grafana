@@ -4,6 +4,8 @@ import (
 	"context"
 	"log/slog"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -203,8 +205,12 @@ func TestParseSlowRequestLogLevel(t *testing.T) {
 }
 
 func TestVersionOutput(t *testing.T) {
+	binaryName := "mcp-grafana"
+	if runtime.GOOS == "windows" {
+		binaryName += ".exe"
+	}
 	t.Run("without ldflags returns non-empty version", func(t *testing.T) {
-		bin := t.TempDir() + "/mcp-grafana"
+		bin := filepath.Join(t.TempDir(), binaryName)
 		build := exec.Command("go", "build", "-o", bin, ".")
 		out, err := build.CombinedOutput()
 		require.NoError(t, err, "go build failed: %s", out)
@@ -215,7 +221,7 @@ func TestVersionOutput(t *testing.T) {
 	})
 
 	t.Run("ldflags version takes precedence", func(t *testing.T) {
-		bin := t.TempDir() + "/mcp-grafana"
+		bin := filepath.Join(t.TempDir(), binaryName)
 		build := exec.Command("go", "build", "-ldflags", "-X github.com/grafana/mcp-grafana.version=v1.2.3", "-o", bin, ".")
 		out, err := build.CombinedOutput()
 		require.NoError(t, err, "go build failed: %s", out)

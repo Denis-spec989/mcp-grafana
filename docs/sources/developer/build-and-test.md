@@ -115,4 +115,4 @@ Refer to the [JSONSchema linter README](https://github.com/grafana/mcp-grafana/b
 ## Next steps
 
 - [Go SDK](../go-sdk/)
-- [Observability (metrics and tracing)](../observability-metrics-and-tracing/)
+- [Observability (local metrics and logs)](../observability-metrics-and-tracing/)

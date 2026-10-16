@@ -6,6 +6,7 @@ package observability
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -21,10 +22,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	sdklog "go.opentelemetry.io/otel/sdk/log"
+	"go.opentelemetry.io/otel"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/semconv/v1.40.0/mcpconv"
 )
 
@@ -43,28 +43,9 @@ func TestSetup(t *testing.T) {
 		// Should return nil handler when metrics disabled
 		assert.Nil(t, obs.MetricsHandler())
 
-		// LoggerProvider should be nil when OTLP log export is not configured.
-		assert.Nil(t, obs.LoggerProvider())
-
 		// Shutdown should work without error
 		err = obs.Shutdown(context.Background())
 		assert.NoError(t, err)
-	})
-
-	t.Run("logger provider populated when OTLP logs endpoint set", func(t *testing.T) {
-		t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
-		t.Setenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "http://localhost:4317")
-		t.Setenv("OTEL_EXPORTER_OTLP_LOGS_INSECURE", "true")
-		cfg := Config{MetricsEnabled: false}
-
-		obs, err := Setup(cfg)
-		require.NoError(t, err)
-		require.NotNil(t, obs)
-		require.NotNil(t, obs.LoggerProvider())
-
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		assert.NoError(t, obs.Shutdown(shutdownCtx))
 	})
 
 	t.Run("metrics enabled", func(t *testing.T) {
@@ -116,47 +97,29 @@ func TestSetup(t *testing.T) {
 		assert.NoError(t, err)
 	})
 
-	// Exercises the realistic production config where both OTLP log export
-	// and Prometheus metrics are simultaneously active. Also provides
-	// incidental coverage that multi-provider Shutdown succeeds on the
-	// happy path when two providers (logger + meter) are live.
-	t.Run("combined: OTLP logs endpoint + metrics enabled", func(t *testing.T) {
-		t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
-		t.Setenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "http://localhost:4317")
-		t.Setenv("OTEL_EXPORTER_OTLP_LOGS_INSECURE", "true")
-		cfg := Config{MetricsEnabled: true}
-
-		obs, err := Setup(cfg)
-		require.NoError(t, err)
-		require.NotNil(t, obs)
-		require.NotNil(t, obs.MetricsHandler())
-		require.NotNil(t, obs.LoggerProvider())
-
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		assert.NoError(t, obs.Shutdown(shutdownCtx))
-	})
 }
 
-// errorTraceExporter returns a sentinel error from Shutdown so a test can
-// assert that Observability.Shutdown aggregates provider errors rather than
-// returning on the first one.
-type errorTraceExporter struct{}
-
-func (e *errorTraceExporter) ExportSpans(context.Context, []sdktrace.ReadOnlySpan) error {
-	return nil
+func TestSetupIgnoresRemoteTelemetryEnvironment(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("metrics=%t", enabled), func(t *testing.T) {
+			// Invalid endpoints and missing TLS files must never be interpreted
+			// or prevent local diagnostics from starting.
+			for _, signal := range []string{"", "_TRACES", "_LOGS", "_METRICS"} {
+				t.Setenv("OTEL_EXPORTER_OTLP"+signal+"_ENDPOINT", "://invalid-collector")
+				t.Setenv("OTEL_EXPORTER_OTLP"+signal+"_CERTIFICATE", "/missing/collector.pem")
+			}
+			providerBefore := otel.GetTracerProvider()
+			loggerBefore := slog.Default()
+			obs, err := Setup(Config{MetricsEnabled: enabled})
+			require.NoError(t, err)
+			require.NotNil(t, obs)
+			assert.Same(t, providerBefore, otel.GetTracerProvider())
+			assert.Same(t, loggerBefore, slog.Default())
+			assert.Equal(t, enabled, obs.MetricsHandler() != nil)
+			assert.NoError(t, obs.Shutdown(context.Background()))
+		})
+	}
 }
-func (e *errorTraceExporter) Shutdown(context.Context) error {
-	return errors.New("tracer boom")
-}
-
-// errorLogExporter returns a sentinel error from Shutdown for the same
-// purpose on the log signal.
-type errorLogExporter struct{}
-
-func (e *errorLogExporter) Export(context.Context, []sdklog.Record) error { return nil }
-func (e *errorLogExporter) ForceFlush(context.Context) error              { return nil }
-func (e *errorLogExporter) Shutdown(context.Context) error                { return errors.New("logger boom") }
 
 // errorMetricExporter returns a sentinel error from Shutdown; wired into a
 // PeriodicReader which surfaces the error through MeterProvider.Shutdown.
@@ -174,38 +137,22 @@ func (e *errorMetricExporter) Export(context.Context, *metricdata.ResourceMetric
 func (e *errorMetricExporter) ForceFlush(context.Context) error { return nil }
 func (e *errorMetricExporter) Shutdown(context.Context) error   { return errors.New("meter boom") }
 
-// TestObservability_ShutdownAggregatesErrors verifies that Shutdown returns
-// errors from ALL failing providers via errors.Join, rather than short-
-// circuiting on the first error. A regression to early-return behaviour
-// would cause at least one of the "boom" substrings to be missing.
-//
-// The Observability struct holds concrete provider pointers with no
-// injection seams, so we construct it directly and wire real providers
-// configured with exporters whose Shutdown returns sentinel errors.
-func TestObservability_ShutdownAggregatesErrors(t *testing.T) {
-	// WithSyncer uses SimpleSpanProcessor which propagates the exporter's
-	// Shutdown error synchronously.
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(&errorTraceExporter{}))
-	lp := sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(&errorLogExporter{})))
+func TestObservability_ShutdownReportsMetricError(t *testing.T) {
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(sdkmetric.NewPeriodicReader(&errorMetricExporter{})))
 
 	obs := &Observability{
-		tracerProvider: tp,
-		loggerProvider: lp,
-		meterProvider:  mp,
+		meterProvider: mp,
 	}
 
 	err := obs.Shutdown(context.Background())
 	require.Error(t, err)
 	msg := err.Error()
-	assert.Contains(t, msg, "tracer boom", "tracer provider error should be aggregated")
-	assert.Contains(t, msg, "logger boom", "logger provider error should be aggregated")
-	assert.Contains(t, msg, "meter boom", "meter provider error should be aggregated")
+	assert.Contains(t, msg, "meter boom")
 }
 
 // Note: we do not directly cover Setup's deferred rollback path (Setup fails
 // mid-way → already-populated providers get shut down). The failure points
-// (setupLogging, prometheus.New, mcpconv.New*) are package-level functions
+// (prometheus.New, mcpconv.New*) are package-level functions
 // with no injection seam; exercising them would require a test-only build
 // tag or a package variable. Given the small blast radius and that Shutdown
 // itself is well-tested above, the rollback is left uncovered and the

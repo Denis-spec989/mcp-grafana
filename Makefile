@@ -57,7 +57,6 @@ test-python-e2e: ## Run Python E2E tests (requires docker-compose services and S
 
 # Common environment variables for run targets
 GRAFANA_ENV = GRAFANA_USERNAME=admin GRAFANA_PASSWORD=admin
-OTEL_ENV = OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 OTEL_EXPORTER_OTLP_INSECURE=true
 ENABLED_TOOLS = search,datasource,incident,prometheus,loki,elasticsearch,influxdb,alerting,dashboard,folder,oncall,asserts,sift,pyroscope,navigation,proxied,annotations,rendering,admin,clickhouse,cloudwatch,athena
 # Note: influxdb is opt-in for end users (like clickhouse/cloudwatch/elasticsearch)
 # but included in Makefile run targets so local development exercises the code.
@@ -68,11 +67,11 @@ run: ## Run the MCP server in stdio mode.
 
 .PHONY: run-sse
 run-sse: ## Run the MCP server in SSE mode.
-	$(GRAFANA_ENV) $(OTEL_ENV) go run ./cmd/mcp-grafana --transport sse --log-level debug --debug --metrics --enabled-tools $(ENABLED_TOOLS)
+	$(GRAFANA_ENV) go run ./cmd/mcp-grafana --transport sse --log-level debug --debug --metrics --enabled-tools $(ENABLED_TOOLS)
 
 PHONY: run-streamable-http
 run-streamable-http: ## Run the MCP server in StreamableHTTP mode.
-	$(GRAFANA_ENV) $(OTEL_ENV) go run ./cmd/mcp-grafana --transport streamable-http --log-level debug --debug --metrics --enabled-tools $(ENABLED_TOOLS)
+	$(GRAFANA_ENV) go run ./cmd/mcp-grafana --transport streamable-http --log-level debug --debug --metrics --enabled-tools $(ENABLED_TOOLS)
 
 define check_mcp_tokens
 	@command -v mcp-tokens >/dev/null 2>&1 || { echo "Error: mcp-tokens is not installed. Install it from https://github.com/sd2k/mcp-tokens"; exit 1; }

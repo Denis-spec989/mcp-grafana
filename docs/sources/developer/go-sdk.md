@@ -43,7 +43,13 @@ contextFunc := mcpgrafana.ComposedStdioContextFunc(grafanaConfig)
 
 Refer to the [package documentation](https://pkg.go.dev/github.com/grafana/mcp-grafana) for the exact types and constructors.
 
+## Local observability
+
+`observability.Setup` configures local metrics and diagnostic logging; it does not configure remote telemetry from environment variables. The remote-export helpers `Observability.LoggerProvider`, `OTLPLogsEndpoint`, and `NewFanoutHandler` have been removed. Use local `log/slog` handlers for diagnostics.
+
+If your embedding application installs its own OpenTelemetry providers, logger, or HTTP transport, those integrations remain under your application's control. The standalone MCP binary does not install trace or log exporters.
+
 ## Next steps
 
-- [Observability (metrics and tracing)](../observability-metrics-and-tracing/) for Prometheus and OTLP.
+- [Observability (local metrics and logs)](../observability-metrics-and-tracing/) for Prometheus metrics, stderr logs, and the remote telemetry policy.
 - [Client TLS (Grafana connection)](../../configure/client-tls-grafana-connection/) for TLS flag reference.

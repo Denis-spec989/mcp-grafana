@@ -1035,9 +1035,7 @@ curl http://localhost:9090/healthz
 
 ### Observability
 
-The MCP server supports Prometheus metrics, OpenTelemetry distributed tracing, and OpenTelemetry log export, following the [OTel MCP semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/mcp/). Tracing and log export are configured via standard `OTEL_*` environment variables and work with any transport.
-
-**Note:** mcp-grafana currently only supports the OTLP/gRPC transport for both traces and logs. `OTEL_EXPORTER_OTLP_PROTOCOL` (and its `_TRACES_PROTOCOL` / `_LOGS_PROTOCOL` variants) are not honored — gRPC is used regardless.
+The MCP server provides local stderr logs and optional Prometheus metrics following the [OTel MCP semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/mcp/). It does not configure remote telemetry exporters.
 
 #### Metrics
 
@@ -1089,53 +1087,22 @@ The log event carries these structured attributes:
 
 Slow-request logging works on all transports (including stdio) and does not require `--metrics`. The default threshold of `0` disables it entirely. Proxied tools flow through `tools/call` and are covered automatically.
 
-#### Tracing
+#### Local logs and remote telemetry policy
 
-Distributed tracing is configured via standard `OTEL_*` environment variables and works independently of the `--metrics` flag. When `OTEL_EXPORTER_OTLP_ENDPOINT` is set, the server exports traces via OTLP/gRPC:
+Logs are written to stderr. `--log-level`, `--debug`, and slow-request logging remain available. The server does not send logs, traces, usage events, or metrics to a telemetry collector, including during startup and shutdown.
 
-```bash
-# Send traces to a local Tempo instance
-OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 \
-OTEL_EXPORTER_OTLP_INSECURE=true \
-./mcp-grafana -t streamable-http
+`OTEL_EXPORTER_OTLP_*` environment variables, including signal-specific traces, logs, and metrics settings, cannot enable remote telemetry. There is no flag to enable remote export. OpenTelemetry instrumentation remains for local metrics; the application does not install a trace or log exporter.
 
-# Send traces to Grafana Cloud with authentication
-OTEL_EXPORTER_OTLP_ENDPOINT=https://tempo-us-central1.grafana.net:443 \
-OTEL_EXPORTER_OTLP_HEADERS="Authorization=Basic ..." \
-./mcp-grafana -t streamable-http
-```
+Prometheus metrics are disabled by default. Enabling `--metrics` exposes data to anyone with network access to the configured HTTP endpoint. Keep that endpoint on a trusted interface and restrict network access. Stdio opens no HTTP or metrics listener, even if metrics flags are supplied.
 
-Tool call spans follow semconv naming (`tools/call <tool_name>`) and include attributes like `gen_ai.tool.name`, `mcp.method.name`, and `mcp.session.id`. The server also supports W3C trace context propagation from the `_meta` field of tool call requests.
+This policy covers the MCP process's own telemetry. Functional requests to Grafana, datasource MCP endpoints, and the public plugin catalog remain available, as do responses to the MCP client. Your MCP/AI client, Grafana, operating-system agents, or a log collector can independently transmit data; configure those components separately. Library consumers that inject their own logger, transport, or OpenTelemetry providers are responsible for those integrations.
 
-#### Logs
-
-When `OTEL_EXPORTER_OTLP_ENDPOINT` (or the signal-specific `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`) is set — the same trigger that enables tracing — the server also exports structured logs via OTLP/gRPC in addition to the existing plain-text stderr output. The `otelslog` bridge automatically attaches `trace_id` and `span_id` from the active span, so log records correlate with the traces the server already emits.
-
-Stderr logging is unchanged when OTLP logging is enabled; you can continue to rely on container logs or pipe stderr to `/dev/null` if you prefer.
+**Docker example with local metrics:**
 
 ```bash
-# Send both logs and traces to a local OTel collector
-OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 \
-OTEL_EXPORTER_OTLP_INSECURE=true \
-./mcp-grafana -t streamable-http
-```
-
-The transport is OTLP/gRPC (default port `4317`). Logs can be sent directly to any managed backend that accepts OTLP/gRPC — for example, Grafana Cloud — by pointing `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` (or the generic `OTEL_EXPORTER_OTLP_ENDPOINT`) at the remote gRPC endpoint and supplying auth via `OTEL_EXPORTER_OTLP_LOGS_HEADERS` (or `OTEL_EXPORTER_OTLP_HEADERS`), mirroring the tracing example above. A local OTel collector is **optional** — useful for fan-out, batching, or multi-backend routing, but not required.
-
-The signal-specific variants `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, `OTEL_EXPORTER_OTLP_LOGS_HEADERS`, `OTEL_EXPORTER_OTLP_LOGS_INSECURE`, `OTEL_EXPORTER_OTLP_LOGS_CERTIFICATE`, `OTEL_EXPORTER_OTLP_LOGS_TIMEOUT`, and `OTEL_EXPORTER_OTLP_LOGS_COMPRESSION` are honored and override their generic `OTEL_EXPORTER_OTLP_*` counterparts — see the [OTel exporter spec](https://opentelemetry.io/docs/specs/otel/protocol/exporter/) for the full list and precedence rules.
-
-If the configured collector is unreachable, log records are buffered in memory (default queue: 2048) and the oldest records are dropped once the queue fills. The process continues without blocking the service. Configure a local OTel collector if you need lossless buffering during outages.
-
-Logs are also exported under the stdio transport, which makes it easy to centralize logs from local `mcp-grafana` instances invoked by IDE clients.
-
-**Docker example with metrics, tracing, and logs:**
-
-```bash
-docker run --rm -p 8000:8000 \
-  -e GRAFANA_URL=http://localhost:3000 \
+docker run --rm -p 127.0.0.1:8000:8000 \
+  -e GRAFANA_URL=http://grafana:3000 \
   -e GRAFANA_SERVICE_ACCOUNT_TOKEN=<your token> \
-  -e OTEL_EXPORTER_OTLP_ENDPOINT=http://tempo:4317 \
-  -e OTEL_EXPORTER_OTLP_INSECURE=true \
   grafana/mcp-grafana \
   -t streamable-http --metrics
 ```

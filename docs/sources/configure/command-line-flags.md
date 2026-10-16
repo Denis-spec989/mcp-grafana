@@ -41,6 +41,10 @@ You can look up defaults, choose `--disable-*` flags, or configure TLS without r
 - `--metrics`: Expose a Prometheus metrics endpoint at `/metrics` (SSE and streamable-http only).
 - `--metrics-address`: Optional separate listen address for metrics (for example, `:9090`). If empty, metrics are served on the main HTTP server.
 
+Metrics are disabled by default and are available only through the HTTP endpoint when explicitly enabled. Stdio opens no HTTP or metrics listener. Anyone with network access to `/metrics` can scrape it; use a trusted listen address and restrict network access.
+
+The server does not export telemetry to collectors. `OTEL_EXPORTER_OTLP_*` variables cannot enable remote trace, log, or metric export. See [Observability](../../developer/observability-metrics-and-tracing/) for the policy and its boundaries.
+
 ## Configure tool categories
 
 - `--enabled-tools`: Comma-separated list of enabled tool **categories**. The default is exactly:

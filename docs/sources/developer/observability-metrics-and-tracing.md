@@ -1,48 +1,32 @@
 ---
-title: Observability (metrics, tracing, and logs)
+title: Observability (local metrics and logs)
 menuTitle: Observability
-description: Expose Prometheus metrics and OpenTelemetry tracing and logs from the Grafana MCP server.
+description: Expose local Prometheus metrics and diagnostic logs without remote telemetry export.
 keywords:
   - Prometheus
   - metrics
   - OpenTelemetry
-  - tracing
   - logs
   - MCP
 weight: 2
 aliases: []
 ---
 
-# Observability (metrics, tracing, and logs)
+# Observability (local metrics and logs)
 
-The MCP server can expose **Prometheus metrics** and supports **[OpenTelemetry](https://opentelemetry.io/)** distributed tracing and log export, following the [OTel MCP semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/mcp/).
-
-Metrics require the **SSE** or **streamable-http** transport. Tracing and log export use standard `OTEL_*` environment variables and work with any transport, independently of `--metrics`.
-
-**Note**: mcp-grafana currently only supports the OTLP/gRPC transport for both traces and logs. `OTEL_EXPORTER_OTLP_PROTOCOL` (and its `_TRACES_PROTOCOL` / `_LOGS_PROTOCOL` variants) are not honored — gRPC is used regardless.
-
-## What you'll achieve
-
-You can scrape MCP operation metrics (HTTP transports only) and export traces and logs to Tempo, Loki, or Grafana Cloud under any transport, including stdio.
-
-## Before you begin
-
-- The server running with **SSE** or **streamable-http** (metrics are not available with stdio).
+The MCP server provides local stderr logs and optional Prometheus metrics following the [OTel MCP semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/mcp/). It does not send its own logs, traces, usage events, or metrics to telemetry collectors, including during startup and shutdown.
 
 ## Enable Prometheus metrics
 
-When using SSE or streamable HTTP transports, enable Prometheus metrics with `--metrics`:
+Metrics are disabled by default and require the SSE or streamable HTTP transport:
 
 ```bash
 # Metrics on the main server at /metrics
 ./mcp-grafana -t streamable-http --metrics
-```
-```bash
-# Metrics on a separate listen address
-./mcp-grafana -t streamable-http --metrics --metrics-address :9090
-```
 
-**Available metrics:**
+# Metrics on a separate loopback address
+./mcp-grafana -t streamable-http --metrics --metrics-address 127.0.0.1:9090
+```
 
 | Metric | Type | Description |
 |--------|------|-------------|
@@ -50,60 +34,35 @@ When using SSE or streamable HTTP transports, enable Prometheus metrics with `--
 | `mcp_server_session_duration_seconds` | Histogram | MCP client session duration (labels: `network_transport`, `mcp_protocol_version`) |
 | `http_server_request_duration_seconds` | Histogram | HTTP server request duration (from otelhttp) |
 
-**Note**: Metrics are only available when using SSE or streamable HTTP transports. They are **not** available with stdio transport.
+Metrics are returned when a client scrapes `/metrics`; the MCP server does not push them to a collector. Anyone with network access to that endpoint can scrape it. Use a trusted listen address and restrict network access.
 
-## Enable OpenTelemetry tracing
+Stdio opens no HTTP or metrics listener, even when `--metrics` or `--metrics-address` is supplied.
 
-When `OTEL_EXPORTER_OTLP_ENDPOINT` is set, the server exports traces via OTLP/gRPC.
+## Use local diagnostic logs
 
-Local example:
+Logs are written to stderr. Set `--log-level` to `debug`, `info`, `warn`, or `error`; use `--debug` for detailed Grafana HTTP diagnostics.
+
+Slow-request logging works with every transport and does not require metrics:
+
 ```bash
-# Send traces to a local Tempo instance
-OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 \
-OTEL_EXPORTER_OTLP_INSECURE=true \
-./mcp-grafana -t streamable-http
+./mcp-grafana -t stdio --slow-request-threshold 500ms
+./mcp-grafana -t streamable-http --slow-request-threshold 500ms --slow-request-log-level info
 ```
 
-Grafana Cloud example:
+The default threshold of `0` disables slow-request events. Events include the MCP method, duration, threshold, tool name when applicable, and error details when a request fails.
+
+## Remote telemetry policy
+
+This build does not configure OTLP trace or log exporters, background export queues, or shutdown export. `OTEL_EXPORTER_OTLP_*` environment variables, including signal-specific traces, logs, and metrics settings, cannot enable telemetry export. There is no flag to enable remote export. OpenTelemetry instrumentation and libraries remain where needed for local monitoring.
+
+The policy applies to the MCP process's own telemetry. Normal tool requests to Grafana, datasource MCP endpoints, and the public plugin catalog remain available. Tool results still go to the MCP client. Your MCP/AI client, Grafana, operating-system agents, or a separate collector reading stderr or `/metrics` can transmit data according to their own configuration. Configure those components separately. Go library consumers that supply their own logger, transport, or OpenTelemetry providers are responsible for those integrations.
+
+## Run with Docker and local metrics
 
 ```bash
-# Send traces to Grafana Cloud with authentication
-OTEL_EXPORTER_OTLP_ENDPOINT=https://tempo-us-central1.grafana.net:443 \
-OTEL_EXPORTER_OTLP_HEADERS="Authorization=Basic ..." \
-./mcp-grafana -t streamable-http
-```
-
-Tool call spans follow naming like `tools/call <tool_name>` and include attributes such as `gen_ai.tool.name`, `mcp.method.name`, and `mcp.session.id`. The server supports W3C trace context propagation from the `_meta` field of tool call requests.
-
-## Enable OpenTelemetry logs
-
-When `OTEL_EXPORTER_OTLP_ENDPOINT` (or the signal-specific `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`) is set — the same trigger as tracing — the server also exports structured logs via OTLP/gRPC in addition to the existing plain-text stderr output. Logs carry `trace_id` and `span_id` from the active span so they correlate with exported traces.
-
-```bash
-# Send logs and traces to a local OTel collector
-OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 \
-OTEL_EXPORTER_OTLP_INSECURE=true \
-./mcp-grafana -t streamable-http
-```
-
-Stderr logging continues unchanged; operators can pipe stderr to `/dev/null` if they only want logs going to the OTel collector.
-
-Logs can be sent directly to any managed backend that accepts OTLP/gRPC — for example, Grafana Cloud — by pointing `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` (or the generic `OTEL_EXPORTER_OTLP_ENDPOINT`) at the remote gRPC endpoint and supplying auth via `OTEL_EXPORTER_OTLP_LOGS_HEADERS` (or `OTEL_EXPORTER_OTLP_HEADERS`), mirroring the tracing example above. A local OTel collector is optional — useful for fan-out, batching, or multi-backend routing, but not required.
-
-The signal-specific variants `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, `OTEL_EXPORTER_OTLP_LOGS_HEADERS`, `OTEL_EXPORTER_OTLP_LOGS_INSECURE`, `OTEL_EXPORTER_OTLP_LOGS_CERTIFICATE`, `OTEL_EXPORTER_OTLP_LOGS_TIMEOUT`, and `OTEL_EXPORTER_OTLP_LOGS_COMPRESSION` are honored and override their generic `OTEL_EXPORTER_OTLP_*` counterparts — see the [OTel exporter spec](https://opentelemetry.io/docs/specs/otel/protocol/exporter/) for the full list and precedence rules.
-
-**Note**: If the configured collector is unreachable, log records are buffered in memory (default queue: 2048) and the oldest records are dropped once the queue fills. The process continues without blocking the service. Configure a local OTel collector if you need lossless buffering during outages.
-
-Logs are also exported under the stdio transport, which makes it easy to centralize logs from local `mcp-grafana` instances invoked by IDE clients.
-
-## Run with Docker (metrics, tracing, and logs)
-
-```bash
-docker run --rm -p 8000:8000 \
-  -e GRAFANA_URL=http://localhost:3000 \
+docker run --rm -p 127.0.0.1:8000:8000 \
+  -e GRAFANA_URL=http://grafana:3000 \
   -e GRAFANA_SERVICE_ACCOUNT_TOKEN=<your token> \
-  -e OTEL_EXPORTER_OTLP_ENDPOINT=http://tempo:4317 \
-  -e OTEL_EXPORTER_OTLP_INSECURE=true \
   grafana/mcp-grafana \
   -t streamable-http --metrics
 ```

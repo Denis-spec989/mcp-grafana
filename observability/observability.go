@@ -1,13 +1,11 @@
-// Package observability provides OpenTelemetry-based metrics, tracing, and
-// log export for the MCP Grafana server.
+// Package observability provides local metrics and diagnostic logging for the
+// MCP Grafana server. It never configures remote telemetry exporters.
 //
 // Metrics follow the OTel MCP semantic conventions using the mcpconv package.
-// Tracing and log export are configured via standard OTEL_* environment variables.
 package observability
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -23,12 +21,9 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/exporters/prometheus"
-	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	sdkresource "go.opentelemetry.io/otel/sdk/resource"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.40.0"
 	"go.opentelemetry.io/otel/semconv/v1.40.0/mcpconv"
 )
@@ -88,12 +83,10 @@ type sessionMeta struct {
 	protocolVersion atomic.Value // stores string
 }
 
-// Observability manages the OpenTelemetry providers and Prometheus handler.
+// Observability manages the local metric provider and Prometheus handler.
 type Observability struct {
-	meterProvider  *sdkmetric.MeterProvider
-	tracerProvider *sdktrace.TracerProvider
-	loggerProvider *sdklog.LoggerProvider
-	promHandler    http.Handler
+	meterProvider *sdkmetric.MeterProvider
+	promHandler   http.Handler
 
 	// Semconv MCP metrics
 	operationDuration mcpconv.ServerOperationDuration
@@ -134,25 +127,13 @@ func newSlowRequestLogger(level slog.Level) *slog.Logger {
 // a global MeterProvider. The otelhttp instrumentation will automatically
 // use this provider for HTTP metrics.
 //
-// Tracing configuration is handled via standard OTEL_* environment variables
-// (e.g., OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_TRACES_SAMPLER).
-//
-// Log export is enabled when OTEL_EXPORTER_OTLP_ENDPOINT or
-// OTEL_EXPORTER_OTLP_LOGS_ENDPOINT is set; use LoggerProvider() to retrieve
-// the provider for wiring into an slog.Handler (e.g., via the otelslog bridge).
+// OTEL_EXPORTER_OTLP_* variables are deliberately ignored: this application
+// does not export traces, logs, or metrics to a telemetry collector.
 func Setup(cfg Config) (_ *Observability, err error) {
-	// Ensure OTel SDK internal errors (async export failures, queue drops, etc.)
-	// surface through slog instead of the stdlib log package where operators
-	// would never see them. Done once per process — sync.Once guards against
-	// tests that construct multiple Observability instances clobbering each
-	// other's expected handlers, and against replacing a user-installed handler.
+	// Keep local metric SDK errors on stderr. Install the handler only once
+	// because Setup may be called more than once by library consumers.
 	otelErrHandlerOnce.Do(func() {
 		otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) {
-			// Write directly to stderr rather than slog.Default(). If the
-			// default handler routes to OTLP (via the fanout), emitting an
-			// SDK error through slog would re-enter the SDK (otelslog bridge
-			// → processor → otel.Handle) and either churn on every failed
-			// batch or, with a synchronous processor, recurse unbounded.
 			fmt.Fprintf(os.Stderr, "otel sdk error: %v\n", err)
 		}))
 	})
@@ -171,8 +152,7 @@ func Setup(cfg Config) (_ *Observability, err error) {
 	// Shut down any providers already populated if Setup fails mid-way. This
 	// is the symmetric counterpart to Shutdown() on the success path: callers
 	// who never receive a non-nil Observability can't call Shutdown themselves,
-	// so their background goroutines and gRPC connections would otherwise leak
-	// for the process lifetime.
+	// so their resources would otherwise leak for the process lifetime.
 	defer func() {
 		if err == nil {
 			return
@@ -182,8 +162,11 @@ func Setup(cfg Config) (_ *Observability, err error) {
 		_ = obs.Shutdown(shutdownCtx)
 	}()
 
-	// Build OTel resource with service identity.
-	// This is shared by both tracing and metrics providers.
+	if !cfg.MetricsEnabled {
+		return obs, nil
+	}
+
+	// Build the local metrics resource with service identity.
 	res, err := sdkresource.Merge(
 		sdkresource.Default(),
 		sdkresource.NewWithAttributes(
@@ -194,36 +177,6 @@ func Setup(cfg Config) (_ *Observability, err error) {
 	)
 	if err != nil {
 		return nil, err
-	}
-
-	// Set up OTLP trace exporter when OTEL_EXPORTER_OTLP_ENDPOINT is configured.
-	// The gRPC exporter respects standard OTEL_* env vars for endpoint, headers,
-	// TLS (OTEL_EXPORTER_OTLP_INSECURE), etc.
-	if os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != "" {
-		traceExporter, traceErr := otlptracegrpc.New(context.Background())
-		if traceErr != nil {
-			return nil, traceErr
-		}
-		tp := sdktrace.NewTracerProvider(
-			sdktrace.WithBatcher(traceExporter),
-			sdktrace.WithResource(res),
-		)
-		otel.SetTracerProvider(tp)
-		obs.tracerProvider = tp
-	}
-
-	// Set up OTLP log exporter when OTEL_EXPORTER_OTLP_ENDPOINT or
-	// OTEL_EXPORTER_OTLP_LOGS_ENDPOINT is set; see setupLogging for the gating
-	// logic. On error, the deferred rollback above shuts down any tracer
-	// provider already populated.
-	lp, err := setupLogging(context.Background(), res)
-	if err != nil {
-		return nil, err
-	}
-	obs.loggerProvider = lp
-
-	if !cfg.MetricsEnabled {
-		return obs, nil
 	}
 
 	// Create Prometheus exporter using default aggregation so that
@@ -265,26 +218,15 @@ func Setup(cfg Config) (_ *Observability, err error) {
 	return obs, nil
 }
 
-// Shutdown gracefully shuts down the observability providers. Errors from all
-// providers are collected so one provider's failure doesn't mask another's.
+// Shutdown releases the local metric provider. There is no remote telemetry
+// queue to flush when the server exits.
 func (o *Observability) Shutdown(ctx context.Context) error {
-	var errs []error
-	if o.tracerProvider != nil {
-		if err := o.tracerProvider.Shutdown(ctx); err != nil {
-			errs = append(errs, fmt.Errorf("tracer provider shutdown: %w", err))
-		}
-	}
-	if o.loggerProvider != nil {
-		if err := o.loggerProvider.Shutdown(ctx); err != nil {
-			errs = append(errs, fmt.Errorf("logger provider shutdown: %w", err))
-		}
-	}
 	if o.meterProvider != nil {
 		if err := o.meterProvider.Shutdown(ctx); err != nil {
-			errs = append(errs, fmt.Errorf("meter provider shutdown: %w", err))
+			return fmt.Errorf("meter provider shutdown: %w", err)
 		}
 	}
-	return errors.Join(errs...)
+	return nil
 }
 
 // MetricsHandler returns the Prometheus HTTP handler for serving metrics.
@@ -555,11 +497,4 @@ func MergeHooks(hooks ...*server.Hooks) *server.Hooks {
 		merged.OnAfterCallTool = append(merged.OnAfterCallTool, h.OnAfterCallTool...)
 	}
 	return merged
-}
-
-// LoggerProvider returns the OTLP log provider, or nil if OTLP logging is
-// not configured (OTEL_EXPORTER_OTLP_ENDPOINT / OTEL_EXPORTER_OTLP_LOGS_ENDPOINT
-// not set).
-func (o *Observability) LoggerProvider() *sdklog.LoggerProvider {
-	return o.loggerProvider
 }
