@@ -1,1225 +1,400 @@
-# Grafana MCP server
+# 🤖 Grafana MCP
 
-[![Unit Tests](https://github.com/grafana/mcp-grafana/actions/workflows/unit.yml/badge.svg)](https://github.com/grafana/mcp-grafana/actions/workflows/unit.yml)
-[![Integration Tests](https://github.com/grafana/mcp-grafana/actions/workflows/integration.yml/badge.svg)](https://github.com/grafana/mcp-grafana/actions/workflows/integration.yml)
-[![E2E Tests](https://github.com/grafana/mcp-grafana/actions/workflows/e2e.yml/badge.svg)](https://github.com/grafana/mcp-grafana/actions/workflows/e2e.yml)
-[![Go Reference](https://pkg.go.dev/badge/github.com/grafana/mcp-grafana.svg)](https://pkg.go.dev/github.com/grafana/mcp-grafana)
-[![MCP Catalog](https://archestra.ai/mcp-catalog/api/badge/quality/grafana/mcp-grafana)](https://archestra.ai/mcp-catalog/grafana__mcp-grafana)
+MCP-сервер для **Grafana**, который подключает AI-инструменты к Grafana через [Model Context Protocol](https://modelcontextprotocol.io/). Позволяет AI-агентам находить дашборды, запрашивать метрики и логи, проверять алерты, исследовать инциденты и управлять ресурсами через взаимодействие на естественном языке.
 
-A [Model Context Protocol][mcp] (MCP) server for Grafana.
+Примеры использования:
 
-This provides access to your Grafana instance and the surrounding ecosystem.
+> «Найди дашборд сервиса payments»\
+> «Покажи p95 времени ответа за последний час»\
+> «Найди ошибки в логах backend за последние 15 минут»\
+> «Какие алерты сейчас срабатывают и кто дежурит?»\
+> «Добавь панель с RPS на дашборд сервиса»
 
-## Quick Start
+AI-агент обращается к Grafana и её источникам данных, получает нужный контекст и возвращает ответ. Доступные действия зависят от включённых инструментов и прав аккаунта.
 
-Requires [uv](https://docs.astral.sh/uv/getting-started/installation/). Add the following to your MCP client configuration (e.g. Claude Desktop, Cursor):
+---
+
+## 📋 Оглавление
+
+- [Возможности](#-возможности)
+- [Быстрый старт](#-быстрый-старт)
+- [Конфигурация](#-конфигурация)
+- [Аутентификация](#-аутентификация)
+- [Инструменты](#-инструменты)
+- [Фильтрация инструментов](#-конфигурация-инструментов)
+- [Безопасность](#-безопасность)
+- [Мониторинг сервера](#-мониторинг-сервера)
+- [Troubleshooting](#-troubleshooting)
+- [Разработка](#-разработка)
+- [Лицензия](#-лицензия)
+
+---
+
+## ✨ Возможности
+
+- 🛠️ **Инструменты Grafana** — дашборды, папки, источники данных, алерты, аннотации, snapshots и плагины.
+- 📊 **Метрики, логи и профили** — Prometheus, Loki и Pyroscope; дополнительные категории для InfluxDB, ClickHouse, CloudWatch, Graphite, Athena, Snowflake, Elasticsearch/OpenSearch и Quickwit.
+- 🔌 **Подключение через stdio** — MCP-клиент запускает локально собранный бинарный файл.
+- 🧠 **Dynamic Instructions** — инструкции для AI-агента формируются с учётом включённых категорий инструментов.
+- 🎛️ **Фильтрация инструментов** — выбор категорий через `--enabled-tools`, отключение через `--disable-<category>` и режим `--disable-write`.
+- 📦 **Экономия контекста** — краткая сводка дашборда, выборка свойств через JSONPath и точечные изменения вместо передачи полного JSON.
+- 🚨 **Расследование инцидентов** — Grafana Incident, Sift, OnCall и Asserts при наличии соответствующих сервисов и прав.
+- 🔐 **Аутентификация** — service account token, чтение токена из файла и Basic Auth.
+- 🖼️ **PNG-изображения** — рендеринг дашбордов и панелей через Grafana Image Renderer, включая preview из provisioning-репозитория.
+- 📈 **Локальная диагностика** — stderr-логи и журнал медленных запросов.
+
+---
+
+## 🚀 Быстрый старт
+
+### 1. Предварительные требования
+
+- **Grafana 9.0+**. Отдельные инструменты требуют дополнительных API, плагинов или сервисов.
+- **Service account token** с правами на нужные ресурсы (см. [Аутентификация](#-аутентификация)).
+- Предустановленный **GigaCode CLI** с поддержкой MCP и настроенным секретом `grafana/GRAFANA_SERVICE_ACCOUNT_TOKEN`.
+- **Go 1.26.3+** и **Git** для сборки бинарного файла.
+
+### 2. Соберите бинарный файл
+
+> **Важно:** Установка должна выполняться в директории **`work`**, где разрешён запуск скриптов и исполняемых файлов. Размещайте репозиторий и собранный бинарный файл внутри неё, например: `/home/work/22808950@sigma.sbrf.ru/GigaIdeProject/mcp-grafana`.
+
+Скачайте репозиторий и выполните сборку:
+
+```bash
+git clone https://github.com/grafana/mcp-grafana.git
+cd mcp-grafana
+go build -o dist/mcp-grafana ./cmd/mcp-grafana
+```
+
+Бинарный файл появится в `dist/mcp-grafana`. Если репозиторий уже скачан, выполните команду сборки из его корня. При установленном Make можно использовать `make build`.
+
+### 3. Подключение в stdio-режиме
+
+Добавьте сервер `grafana` в раздел `mcpServers` конфигурации GigaCode CLI:
 
 ```json
 {
   "mcpServers": {
     "grafana": {
-      "command": "uvx",
-      "args": ["mcp-grafana"],
-      "env": {
-        "GRAFANA_URL": "http://localhost:3000",
-        "GRAFANA_SERVICE_ACCOUNT_TOKEN": "<your service account token>"
-      }
-    }
-  }
-}
-```
-
-For Grafana Cloud, replace `GRAFANA_URL` with your instance URL (e.g. `https://myinstance.grafana.net`). See [Usage](#usage) for more installation options including Docker, binary, and Helm.
-
-## Requirements
-
-- **Grafana version 9.0 or later** is required for full functionality. Some features, particularly datasource-related operations, may not work correctly with earlier versions due to missing API endpoints.
-
-## Features
-
-_The following features are currently available in MCP server. This list is for informational purposes only and does not represent a roadmap or commitment to future features._
-
-### Dashboards
-
-- **Search for dashboards:** Find dashboards by title or other metadata
-- **Get dashboard by UID:** Retrieve full dashboard details using its unique identifier. _Warning: Large dashboards can consume significant context window space._
-- **Get dashboard summary:** Get a compact overview of a dashboard including title, panel count, panel types, variables, and metadata without the full JSON to minimize context window usage
-- **Get dashboard property:** Extract specific parts of a dashboard using JSONPath expressions (e.g., `$.title`, `$.panels[*].title`) to fetch only needed data and reduce context window consumption
-- **Update or create a dashboard:** Modify existing dashboards or create new ones. _Warning: Requires full dashboard JSON which can consume large amounts of context window space._
-- **Patch dashboard:** Apply specific changes to a dashboard without requiring the full JSON, significantly reducing context window usage for targeted modifications
-- **Get panel queries and datasource info:** Get the title, query string, and datasource information (including UID and type, if available) from every panel in a dashboard
-
-### Run Panel Query
-
-> **Note:** Run panel query tools are **disabled by default**. To enable them, add `runpanelquery` to your `--enabled-tools` flag.
-
-- **Run panel query:** Execute a dashboard panel's query with custom time ranges and variable overrides.
-
-#### Context Window Management
-
-The dashboard tools now include several strategies to manage context window usage effectively ([issue #101](https://github.com/grafana/mcp-grafana/issues/101)):
-
-- **Use `get_dashboard_summary`** for dashboard overview and planning modifications
-- **Use `get_dashboard_property`** with JSONPath when you only need specific dashboard parts
-- **Avoid `get_dashboard_by_uid`** unless you specifically need the complete dashboard JSON
-
-### Datasources
-
-- **List and fetch datasource information:** View all configured datasources and retrieve detailed information about each.
-  - _Supported datasource types: Prometheus, Loki, ClickHouse, CloudWatch, Elasticsearch, OpenSearch, Snowflake, Athena._
-
-### Query Examples
-
-> **Note:** Query examples tools are **disabled by default**. To enable them, add `examples` to your `--enabled-tools` flag.
-
-- **Get query examples:** Retrieve example queries for different datasource types to learn query syntax.
-
-### Prometheus Querying
-
-- **Query Prometheus:** Execute PromQL queries (supports both instant and range metric queries) against Prometheus datasources.
-- **Query Prometheus metadata:** Retrieve metric metadata, metric names, label names, and label values from Prometheus datasources.
-- **Query histogram percentiles:** Calculate histogram percentile values (p50, p90, p95, p99) using histogram_quantile.
-
-### Loki Querying
-
-- **Query Loki logs and metrics:** Run both log queries and metric queries using LogQL against Loki datasources.
-- **Query Loki metadata:** Retrieve label names, label values, and stream statistics from Loki datasources.
-- **Query Loki patterns:** Retrieve log patterns detected by Loki to identify common log structures and anomalies.
-
-### InfluxDB Querying
-
-> **Note:** InfluxDB tools are **disabled by default**. To enable them, add `influxdb` to your `--enabled-tools` flag.
-
-- **Query InfluxDB:** Execute queries against InfluxDB datasources using either InfluxQL (v1.x) or Flux (v2.x). The dialect is inferred from the datasource configuration, or can be set explicitly via the `dialect` parameter.
-
-### ClickHouse Querying
-
-> **Note:** ClickHouse tools are **disabled by default**. To enable them, add `clickhouse` to your `--enabled-tools` flag.
-
-- **List ClickHouse tables:** List all tables in a ClickHouse database with row counts and sizes.
-- **Describe table schema:** Get column names, types, and metadata for a ClickHouse table.
-- **Query ClickHouse:** Execute SQL queries with Grafana macro and variable substitution support.
-
-### CloudWatch Querying
-
-> **Note:** CloudWatch tools are **disabled by default**. To enable them, add `cloudwatch` to your `--enabled-tools` flag.
-
-- **List CloudWatch namespaces:** Discover available AWS CloudWatch namespaces.
-- **List CloudWatch metrics:** List metrics available in a specific namespace.
-- **List CloudWatch dimensions:** Get dimensions for filtering metric queries.
-- **Query CloudWatch:** Execute CloudWatch metric queries with time range support.
-
-### Graphite Querying
-
-> **Note:** Graphite tools are **disabled by default**. To enable them, add `graphite` to your `--enabled-tools` flag.
-
-- **Query Graphite:** Execute Graphite render API queries against a Graphite datasource.
-- **List Graphite metrics:** Browse and discover Graphite metric paths.
-- **List Graphite tags:** List available Graphite tags and tag values.
-- **Query Graphite density:** Query Graphite metric density for a given pattern.
-
-### Athena Querying
-
-> **Note:** Athena tools are **disabled by default**. To enable them, add `athena` to your `--enabled-tools` flag.
-
-- **List Athena catalogs:** Discover available data catalogs (e.g. AwsDataCatalog, Iceberg connectors).
-- **List Athena databases:** List databases in an Athena catalog.
-- **List Athena tables:** List tables in an Athena database.
-- **Describe Athena table:** Get column names for an Athena table.
-- **Query Athena:** Execute SQL queries against Amazon Athena via Grafana with macro substitution, limit enforcement, and template variable support.
-
-### Snowflake Querying
-
-> **Note:** Snowflake tools are **disabled by default**. To enable them, add `snowflake` to your `--enabled-tools` flag.
-
-Queries go through Grafana's Snowflake datasource (Grafana Enterprise plugin `grafana-snowflake-datasource`), so authentication is handled by the datasource configuration in Grafana — credentials are never seen by the MCP server. This is the same model used for the ClickHouse tools.
-
-- **List Snowflake tables:** Discover tables (with database, schema, kind, row count, and size) via `INFORMATION_SCHEMA.TABLES`. Optional database/schema filters.
-- **Describe table schema:** Get column names, data types, nullability, defaults, and comments for a Snowflake table.
-- **Query Snowflake:** Execute SQL queries with macro and variable substitution support. Useful for querying Snowflake's event tables (e.g. `SNOWFLAKE.TELEMETRY.EVENTS`) for logs and traces, or any user table.
-  - Supported macros: `$__timeFilter(column)`, `$__timeFrom`, `$__timeTo`, `$__from`, `$__to` (Unix ms), `$__interval` (seconds), `$__interval_ms`, and `${varname}` for template variable substitution.
-
-### Elasticsearch/OpenSearch Querying
-
-> **Note:** Elasticsearch/OpenSearch tools are **disabled by default**. To enable them, add `elasticsearch` to your `--enabled-tools` flag.
-
-- **Query Elasticsearch/OpenSearch:** Execute search queries against Elasticsearch or OpenSearch datasources using either Lucene query syntax or Elasticsearch Query DSL. Supports filtering by time range and retrieving logs, metrics, or any indexed data. Returns documents with their index, ID, source fields, and optional relevance score.
-
-### Quickwit Querying
-
-> **Note:** Quickwit tools are **disabled by default**. To enable them, add `quickwit` to your `--enabled-tools` flag.
-
-- **Query Quickwit:** Execute search queries against Quickwit datasources using Lucene query syntax or partial Elasticsearch-compatible Query DSL. Supports filtering by time range and retrieving logs or other indexed documents. Returns documents with their index, ID, source fields, and optional relevance score.
-
-### Incidents
-
-- **Search, create, and update incidents:** Manage incidents in Grafana Incident, including searching, creating, and adding activities to incidents.
-
-### Sift Investigations
-
-- **List Sift investigations:** Retrieve a list of Sift investigations, with support for a limit parameter.
-- **Get Sift investigation:** Retrieve details of a specific Sift investigation by its UUID.
-- **Get Sift analyses:** Retrieve a specific analysis from a Sift investigation.
-- **Find error patterns in logs:** Detect elevated error patterns in Loki logs using Sift.
-- **Find slow requests:** Detect slow requests using Sift (Tempo).
-
-### Alerting
-
-- **List and fetch alert rule information:** View alert rules and their statuses (firing/normal/error/etc.) in Grafana. Supports both Grafana-managed rules and datasource-managed rules from Prometheus or Loki datasources.
-- **Create and update alert rules:** Create new alert rules or modify existing ones.
-- **Delete alert rules:** Remove alert rules by UID.
-- **Manage alerting routing:** View notification policies, contact points, and time intervals. Supports both Grafana-managed contact points and receivers from external Alertmanager datasources (Prometheus Alertmanager, Mimir, Cortex).
-
-### Grafana OnCall
-
-- **List and manage schedules:** View and manage on-call schedules in Grafana OnCall.
-- **Get shift details:** Retrieve detailed information about specific on-call shifts.
-- **Get current on-call users:** See which users are currently on call for a schedule.
-- **List teams and users:** View all OnCall teams and users.
-- **List alert groups:** View and filter alert groups from Grafana OnCall by various criteria including state, integration, labels, and time range.
-- **Get alert group details:** Retrieve detailed information about a specific alert group by its ID.
-
-### Admin
-
-> **Note:** Admin tools are **disabled by default**. To enable them, include `admin` in your `--enabled-tools` flag.
-- **List teams:** View all configured teams in Grafana.
-- **List Users:** View all users in an organization in Grafana.
-- **List all roles:** List all Grafana roles, with an optional filter for delegatable roles.
-- **Get role details:** Get details for a specific Grafana role by UID.
-- **List assignments for a role:** List all users, teams, and service accounts assigned to a role.
-- **List roles for users:** List all roles assigned to one or more users.
-- **List roles for teams:** List all roles assigned to one or more teams.
-- **List permissions for a resource:** List all permissions defined for a specific resource (dashboard, datasource, folder, etc.).
-- **Describe a Grafana resource:** List available permissions and assignment capabilities for a resource type.
-
-### Navigation
-
-- **Generate deeplinks:** Create accurate deeplink URLs for Grafana resources instead of relying on LLM URL guessing.
-  - **Dashboard links:** Generate direct links to dashboards using their UID (e.g., `http://localhost:3000/d/dashboard-uid`)
-  - **Panel links:** Create links to specific panels within dashboards with viewPanel parameter (e.g., `http://localhost:3000/d/dashboard-uid?viewPanel=5`)
-  - **Explore links:** Generate links to Grafana Explore with pre-configured datasources (e.g., `http://localhost:3000/explore?left={"datasource":"prometheus-uid"}`)
-  - **Time range support:** Add time range parameters to links (`from=now-1h&to=now`)
-  - **Custom parameters:** Include additional query parameters like dashboard variables or refresh intervals
-
-### Annotations
-
-- **Get Annotations:** Query annotations with filters. Supports time range, dashboard UID, tags, and match mode.
-- **Create Annotation:** Create a new annotation on a dashboard or panel.
-- **Create Graphite Annotation:** Create annotations using Graphite format (`what`, `when`, `tags`, `data`).
-- **Update Annotation:** Replace all fields of an existing annotation (full update).
-- **Patch Annotation:** Update only specific fields of an annotation (partial update).
-- **Get Annotation Tags:** List available annotation tags with optional filtering.
-
-### Snapshots
-
-- **List snapshots:** List dashboard snapshots with optional query and limit filters.
-- **Get snapshot:** Retrieve snapshot metadata and dashboard payload by snapshot key.
-- **Create snapshot:** Create a dashboard snapshot from a full dashboard payload, with optional expiration and external snapshot options.
-- **Delete snapshot:** Delete a snapshot by snapshot key.
-
-### Rendering
-
-- **Get panel or dashboard image:** Render a Grafana dashboard panel or full dashboard as a PNG image. Returns the image as base64 encoded data for use in reports, alerts, or presentations. Supports customizing dimensions, time range, theme, scale, and dashboard variables. Also supports rendering not-yet-applied dashboards from a provisioning repository branch (e.g. a git-sync PR preview) via the optional `provisioningPreview` parameter.
-  - _Note: Requires the [Grafana Image Renderer](https://grafana.com/docs/grafana/latest/setup-grafana/image-rendering/) service to be installed and configured._
-
-### Provisioning
-
-- **List provisioning repositories:** List provisioning repositories configured for this Grafana instance (e.g. git-sync sources), returning each repository's slug along with its source URL, branch, path, sync state, and health.
-- **Validate provisioning file:** Dry-run-apply a file from a provisioning repository at a given branch or commit. Returns whether it would be accepted, the resource action (create/update), the target resource type, and any structured validation errors — the same admission surface Grafana's PR commenter uses.
-
-The list of tools is configurable, so you can choose which tools you want to make available to the MCP client.
-This is useful if you don't use certain functionality or if you don't want to take up too much of the context window.
-To disable a category of tools, use the `--disable-<category>` flag when starting the server. For example, to disable
-the OnCall tools, use `--disable-oncall`, or to disable navigation deeplink generation, use `--disable-navigation`.
-
-
-#### RBAC Permissions
-
-Each tool requires specific RBAC permissions to function properly. When creating a service account for the MCP server, ensure it has the necessary permissions based on which tools you plan to use. The permissions listed are the minimum required actions - you may also need appropriate scopes (e.g., `datasources:*`, `dashboards:*`, `folders:*`) depending on your use case.
-
-Tip: If you're not familiar with Grafana RBAC or you want a quicker, simpler setup instead of configuring many granular scopes, you can assign a built-in role such as `Editor` to the service account. The `Editor` role grants broad read/write access that will allow most MCP server operations; it is less granular (and therefore less restrictive) than manually-applied scopes, so use it only when convenience is more important than strict least-privilege access.
-
-**Note:** Grafana Incident and Sift tools use basic Grafana roles instead of fine-grained RBAC permissions:
-- **Viewer role:** Required for read-only operations (list incidents, get investigations)
-- **Editor role:** Required for write operations (create incidents, modify investigations)
-
-For more information about Grafana RBAC, see the [official documentation](https://grafana.com/docs/grafana/latest/administration/roles-and-permissions/access-control/).
-
-#### RBAC Scopes
-
-Scopes define the specific resources that permissions apply to. Each action requires both the appropriate permission and scope combination.
-
-**Common Scope Patterns:**
-
-- **Broad access:** Use `*` wildcards for organization-wide access
-
-  - `datasources:*` - Access to all datasources
-  - `dashboards:*` - Access to all dashboards
-  - `folders:*` - Access to all folders
-  - `teams:*` - Access to all teams
-
-- **Limited access:** Use specific UIDs or IDs to restrict access to individual resources
-  - `datasources:uid:prometheus-uid` - Access only to a specific Prometheus datasource
-  - `dashboards:uid:abc123` - Access only to dashboard with UID `abc123`
-  - `folders:uid:xyz789` - Access only to folder with UID `xyz789`
-  - `teams:id:5` - Access only to team with ID `5`
-  - `global.users:id:123` - Access only to user with ID `123`
-
-**Examples:**
-
-- **Full MCP server access:** Grant broad permissions for all tools
-
-  ```
-  datasources:* (datasources:read, datasources:query)
-  dashboards:* (dashboards:read, dashboards:create, dashboards:write)
-  folders:* (for dashboard creation and alert rules)
-  teams:* (teams:read)
-  global.users:* (users:read)
-  ```
-
-- **Limited datasource access:** Only query specific Prometheus and Loki instances
-
-  ```
-  datasources:uid:prometheus-prod (datasources:query)
-  datasources:uid:loki-prod (datasources:query)
-  ```
-
-- **Dashboard-specific access:** Read only specific dashboards
-  ```
-  dashboards:uid:monitoring-dashboard (dashboards:read)
-  dashboards:uid:alerts-dashboard (dashboards:read)
-  ```
-
-### Tools
-
-| Tool                              | Category                  | Description                                                                                                  | Required RBAC Permissions                              | Required Scopes                                     |
-| --------------------------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------ | --------------------------------------------------- |
-| `list_teams`                      | Admin                     | List all teams                                                                                               | `teams:read`                                           | `teams:*` or `teams:id:1`                           |
-| `list_users_by_org`               | Admin                     | List all users in an organization                                                                            | `users:read`                                           | `global.users:*` or `global.users:id:123`           |
-| `list_all_roles`                  | Admin                     | List all Grafana roles                                                                                       | `roles:read`                                           | `roles:*`                                           |
-| `get_role_details`                | Admin                     | Get details for a Grafana role                                                                               | `roles:read`                                           | `roles:uid:editor`                                  |
-| `get_role_assignments`            | Admin                     | List assignments for a role                                                                                  | `roles:read`                                           | `roles:uid:editor`                                  |
-| `list_user_roles`                 | Admin                     | List roles for users                                                                                         | `roles:read`                                           | `global.users:id:123`                               |
-| `list_team_roles`                 | Admin                     | List roles for teams                                                                                         | `roles:read`                                           | `teams:id:7`                                        |
-| `get_resource_permissions`        | Admin                     | List permissions for a resource                                                                              | `permissions:read`                                     | `dashboards:uid:abcd1234`                           |
-| `get_resource_description`        | Admin                     | Describe a Grafana resource type                                                                             | `permissions:read`                                     | `dashboards:*`                                      |
-| `search_dashboards`               | Search                    | Search for dashboards                                                                                        | `dashboards:read`                                      | `dashboards:*` or `dashboards:uid:abc123`           |
-| `get_dashboard_by_uid`            | Dashboard                 | Get a dashboard by uid                                                                                       | `dashboards:read`                                      | `dashboards:uid:abc123`                             |
-| `update_dashboard`                | Dashboard                 | Update or create a new dashboard                                                                             | `dashboards:create`, `dashboards:write`                | `dashboards:*`, `folders:*` or `folders:uid:xyz789` |
-| `get_dashboard_panel_queries`     | Dashboard                 | Get panel title, queries, datasource UID and type from a dashboard                                           | `dashboards:read`                                      | `dashboards:uid:abc123`                             |
-| `run_panel_query`                 | RunPanelQuery*            | Execute one or more dashboard panel queries                                                                  | `dashboards:read`, `datasources:query`                 | `dashboards:uid:*`, `datasources:uid:*`             |
-| `get_dashboard_property`          | Dashboard                 | Extract specific parts of a dashboard using JSONPath expressions                                             | `dashboards:read`                                      | `dashboards:uid:abc123`                             |
-| `get_dashboard_summary`           | Dashboard                 | Get a compact summary of a dashboard without full JSON                                                       | `dashboards:read`                                      | `dashboards:uid:abc123`                             |
-| `list_datasources`                | Datasources               | List datasources                                                                                             | `datasources:read`                                     | `datasources:*`                                     |
-| `get_datasource`                  | Datasources               | Get a datasource by UID or name                                                                              | `datasources:read`                                     | `datasources:uid:prometheus-uid`                    |
-| `get_query_examples`              | Examples*                 | Get example queries for a datasource type                                                                    | `datasources:read`                                     | `datasources:*`                                     |
-| `query_prometheus`                | Prometheus                | Execute a query against a Prometheus datasource                                                              | `datasources:query`                                    | `datasources:uid:prometheus-uid`                    |
-| `list_prometheus_metric_metadata` | Prometheus                | List metric metadata                                                                                         | `datasources:query`                                    | `datasources:uid:prometheus-uid`                    |
-| `list_prometheus_metric_names`    | Prometheus                | List available metric names                                                                                  | `datasources:query`                                    | `datasources:uid:prometheus-uid`                    |
-| `list_prometheus_label_names`     | Prometheus                | List label names matching a selector                                                                         | `datasources:query`                                    | `datasources:uid:prometheus-uid`                    |
-| `list_prometheus_label_values`    | Prometheus                | List values for a specific label                                                                             | `datasources:query`                                    | `datasources:uid:prometheus-uid`                    |
-| `query_prometheus_histogram`      | Prometheus                | Calculate histogram percentile values                                                                        | `datasources:query`                                    | `datasources:uid:prometheus-uid`                    |
-| `list_incidents`                  | Incident                  | List incidents in Grafana Incident                                                                           | Viewer role                                            | N/A                                                 |
-| `create_incident`                 | Incident                  | Create an incident in Grafana Incident                                                                       | Editor role                                            | N/A                                                 |
-| `add_activity_to_incident`        | Incident                  | Add an activity item to an incident in Grafana Incident                                                      | Editor role                                            | N/A                                                 |
-| `get_incident`                    | Incident                  | Get a single incident by ID                                                                                  | Viewer role                                            | N/A                                                 |
-| `query_loki_logs`                 | Loki                      | Query and retrieve logs using LogQL (either log or metric queries)                                           | `datasources:query`                                    | `datasources:uid:loki-uid`                          |
-| `list_loki_label_names`           | Loki                      | List all available label names in logs                                                                       | `datasources:query`                                    | `datasources:uid:loki-uid`                          |
-| `list_loki_label_values`          | Loki                      | List values for a specific log label                                                                         | `datasources:query`                                    | `datasources:uid:loki-uid`                          |
-| `query_loki_stats`                | Loki                      | Get statistics about log streams                                                                             | `datasources:query`                                    | `datasources:uid:loki-uid`                          |
-| `query_loki_patterns`             | Loki                      | Query detected log patterns to identify common structures                                                    | `datasources:query`                                    | `datasources:uid:loki-uid`                          |
-| `analyze_loki_labels`             | Loki                      | Audit a Loki label strategy (live or static) and optionally diagnose query performance                       | `datasources:query`                                    | `datasources:uid:loki-uid`                          |
-| `suggest_loki_alloy_label_config` | Config                    | Generate an Alloy `loki.process` snippet enforcing approved labels                                           | N/A                                                    | N/A                                                 |
-| `query_influxdb`                  | InfluxDB                  | Query InfluxDB using InfluxQL (v1) or Flux (v2)                                                              | `datasources:query`                                    | `datasources:uid:influxdb-uid`                      |
-| `list_clickhouse_tables`          | ClickHouse*               | List tables in a ClickHouse database                                                                         | `datasources:query`                                    | `datasources:uid:*`                                 |
-| `describe_clickhouse_table`       | ClickHouse*               | Get table schema with column types                                                                           | `datasources:query`                                    | `datasources:uid:*`                                 |
-| `query_clickhouse`                | ClickHouse*               | Execute SQL queries with macro substitution                                                                  | `datasources:query`                                    | `datasources:uid:*`                                 |
-| `list_cloudwatch_namespaces`      | CloudWatch*               | List available AWS CloudWatch namespaces                                                                     | `datasources:query`                                    | `datasources:uid:*`                                 |
-| `list_cloudwatch_metrics`         | CloudWatch*               | List metrics in a namespace                                                                                  | `datasources:query`                                    | `datasources:uid:*`                                 |
-| `list_cloudwatch_dimensions`      | CloudWatch*               | List dimensions for a metric                                                                                 | `datasources:query`                                    | `datasources:uid:*`                                 |
-| `query_cloudwatch`                | CloudWatch*               | Execute CloudWatch metric queries                                                                            | `datasources:query`                                    | `datasources:uid:*`                                 |
-| `list_athena_catalogs`            | Athena*                   | List available Athena data catalogs                                                                          | `datasources:query`                                    | `datasources:uid:*`                                 |
-| `list_athena_databases`           | Athena*                   | List databases in an Athena catalog                                                                          | `datasources:query`                                    | `datasources:uid:*`                                 |
-| `list_athena_tables`              | Athena*                   | List tables in an Athena database                                                                            | `datasources:query`                                    | `datasources:uid:*`                                 |
-| `describe_athena_table`           | Athena*                   | Get column names for an Athena table                                                                         | `datasources:query`                                    | `datasources:uid:*`                                 |
-| `query_athena`                    | Athena*                   | Execute SQL queries with macro substitution                                                                  | `datasources:query`                                    | `datasources:uid:*`                                 |
-| `query_elasticsearch`             | Elasticsearch/OpenSearch* | Query Elasticsearch or OpenSearch using Lucene syntax or Query DSL                                           | `datasources:query`                                    | `datasources:uid:datasource-uid`                    |
-| `query_quickwit`                  | Quickwit*                 | Query Quickwit using Lucene syntax or Query DSL                                                              | `datasources:query`                                    | `datasources:uid:quickwit-uid`                      |
-| `list_snowflake_tables`           | Snowflake*                | List tables in a Snowflake database/schema via INFORMATION_SCHEMA                                            | `datasources:query`                                    | `datasources:uid:*`                                 |
-| `describe_snowflake_table`        | Snowflake*                | Get table schema (column types, nullability, defaults, comments)                                             | `datasources:query`                                    | `datasources:uid:*`                                 |
-| `query_snowflake`                 | Snowflake*                | Execute SQL queries with macro/variable substitution                                                         | `datasources:query`                                    | `datasources:uid:*`                                 |
-| `alerting_manage_rules`           | Alerting                  | Manage alert rules (list, get, versions, create, update, delete)                                             | `alert.rules:read` + `alert.rules:write` for mutations | `folders:*` or `folders:uid:alerts-folder`          |
-| `alerting_manage_routing`         | Alerting                  | Manage notification policies, contact points, and time intervals                                             | `alert.notifications:read`                             | Global scope                                        |
-| `list_oncall_schedules`           | OnCall                    | List schedules from Grafana OnCall                                                                           | `grafana-oncall-app.schedules:read`                    | Plugin-specific scopes                              |
-| `get_oncall_shift`                | OnCall                    | Get details for a specific OnCall shift                                                                      | `grafana-oncall-app.schedules:read`                    | Plugin-specific scopes                              |
-| `get_current_oncall_users`        | OnCall                    | Get users currently on-call for a specific schedule                                                          | `grafana-oncall-app.schedules:read`                    | Plugin-specific scopes                              |
-| `list_oncall_teams`               | OnCall                    | List teams from Grafana OnCall                                                                               | `grafana-oncall-app.user-settings:read`                | Plugin-specific scopes                              |
-| `list_oncall_users`               | OnCall                    | List users from Grafana OnCall                                                                               | `grafana-oncall-app.user-settings:read`                | Plugin-specific scopes                              |
-| `list_alert_groups`               | OnCall                    | List alert groups from Grafana OnCall with filtering options                                                 | `grafana-oncall-app.alert-groups:read`                 | Plugin-specific scopes                              |
-| `get_alert_group`                 | OnCall                    | Get a specific alert group from Grafana OnCall by its ID                                                     | `grafana-oncall-app.alert-groups:read`                 | Plugin-specific scopes                              |
-| `get_sift_investigation`          | Sift                      | Retrieve an existing Sift investigation by its UUID                                                          | Viewer role                                            | N/A                                                 |
-| `get_sift_analysis`               | Sift                      | Retrieve a specific analysis from a Sift investigation                                                       | Viewer role                                            | N/A                                                 |
-| `list_sift_investigations`        | Sift                      | Retrieve a list of Sift investigations with an optional limit                                                | Viewer role                                            | N/A                                                 |
-| `find_error_pattern_logs`         | Sift                      | Finds elevated error patterns in Loki logs.                                                                  | Editor role                                            | N/A                                                 |
-| `find_slow_requests`              | Sift                      | Finds slow requests from the relevant tempo datasources.                                                     | Editor role                                            | N/A                                                 |
-| `list_pyroscope_label_names`      | Pyroscope                 | List label names matching a selector                                                                         | `datasources:query`                                    | `datasources:uid:pyroscope-uid`                     |
-| `list_pyroscope_label_values`     | Pyroscope                 | List label values matching a selector for a label name                                                       | `datasources:query`                                    | `datasources:uid:pyroscope-uid`                     |
-| `list_pyroscope_profile_types`    | Pyroscope                 | List available profile types                                                                                 | `datasources:query`                                    | `datasources:uid:pyroscope-uid`                     |
-| `query_pyroscope`                 | Pyroscope                 | Query profiles, metrics, or both from Pyroscope                                                              | `datasources:query`                                    | `datasources:uid:pyroscope-uid`                     |
-| `get_assertions`                  | Asserts                   | Get assertion summary for a given entity                                                                     | Plugin-specific permissions                            | Plugin-specific scopes                              |
-| `generate_deeplink`               | Navigation                | Generate accurate deeplink URLs for Grafana resources                                                        | None (read-only URL generation)                        | N/A                                                 |
-| `get_annotations`                 | Annotations               | Fetch annotations with filters                                                                               | `annotations:read`                                     | `annotations:*` or `annotations:id:123`             |
-| `create_annotation`               | Annotations               | Create a new annotation (standard or Graphite format)                                                        | `annotations:write`                                    | `annotations:*`                                     |
-| `update_annotation`               | Annotations               | Update specific fields of an annotation (partial update)                                                     | `annotations:write`                                    | `annotations:*`                                     |
-| `get_annotation_tags`             | Annotations               | List annotation tags with optional filtering                                                                 | `annotations:read`                                     | `annotations:*`                                     |
-| `list_snapshots`                  | Snapshot                  | List dashboard snapshots with optional query and limit filters                                               | `dashboards:read`                                      | `dashboards:*` or `dashboards:uid:abc123`           |
-| `get_snapshot`                    | Snapshot                  | Get snapshot metadata and dashboard payload by snapshot key                                                  | `dashboards:read`                                      | `dashboards:*` or `dashboards:uid:abc123`           |
-| `create_snapshot`                 | Snapshot                  | Create a dashboard snapshot from a full dashboard payload                                                    | `dashboards:write`                                     | `dashboards:*` or `dashboards:uid:abc123`           |
-| `delete_snapshot`                 | Snapshot                  | Delete a dashboard snapshot by snapshot key                                                                  | `dashboards:write`                                     | `dashboards:*` or `dashboards:uid:abc123`           |
-| `get_panel_image`                 | Rendering                 | Render a stored dashboard or panel — or a provisioning preview from a repository branch — as a PNG image     | `dashboards:read`                                      | `dashboards:uid:abc123`                             |
-| `get_panel_image_and_save`        | Rendering                 | Render a dashboard or panel as a PNG image and save it to a file on the server (write tool)                  | `dashboards:read`                                      | `dashboards:uid:abc123`                             |
-| `list_provisioning_repositories`  | Provisioning              | List provisioning repositories (e.g. git-sync sources) with their source URL, branch, sync state, and health | `provisioning.repositories:read`                       | N/A                                                 |
-| `validate_provisioning_file`      | Provisioning              | Dry-run-apply a file from a provisioning repository and report admission validation errors                   | `provisioning.repositories:read`                       | N/A                                                 |
-
-_* Disabled by default. Add category to `--enabled-tools` to enable._
-
-## CLI Flags Reference
-
-The `mcp-grafana` binary supports various command-line flags for configuration:
-
-**Transport Options:**
-- `-t, --transport`: Transport type (`stdio`, `sse`, or `streamable-http`) - default: `stdio`
-- `--address`: The host and port for SSE/streamable-http server - default: `localhost:8000`
-- `--base-path`: Base path for the SSE/streamable-http server
-- `--endpoint-path`: Endpoint path for the streamable-http server - default: `/`
-
-**Debug and Logging:**
-- `--debug`: Enable debug mode for detailed HTTP request/response logging
-- `--log-level`: Log level (`debug`, `info`, `warn`, `error`) - default: `info`
-
-**Observability:**
-- `--metrics`: Enable Prometheus metrics endpoint at `/metrics`
-- `--metrics-address`: Separate address for metrics server (e.g., `:9090`). If empty, metrics are served on the main server
-- `--slow-request-threshold`: Log an event when any MCP request (tool invocation, list, resource read, etc.) takes longer than this duration. Accepts Go duration strings (e.g., `500ms`, `5s`). Default `0` disables slow-request logging. See the [Slow-request logging](#slow-request-logging) section.
-- `--slow-request-log-level`: Log level for slow-request events (`info` or `warn`) - default: `warn`.
-
-**Session Management:**
-- `--session-idle-timeout-minutes`: Session idle timeout in minutes. Sessions with no activity for this duration are automatically reaped - default: `30`. Set to `0` to disable session reaping. Only relevant for SSE and streamable-http transports.
-
-**Tool Configuration:**
-- `--enabled-tools`: Comma-separated list of enabled categories - default: all categories except `admin`, `athena`, `clickhouse`, `cloudwatch`, `elasticsearch`, `examples`, `graphite`, `quickwit`, `runpanelquery`, and `snowflake`. To enable disabled categories, add them to the list (e.g., `"search,datasource,...,snowflake"`)
-- `--max-loki-log-limit`: Maximum number of log lines returned per `query_loki_logs` call - default: `100`. Note: Set this at least 1 below Loki's server-side `max_entries_limit_per_query` to allow truncation detection (the tool requests `limit+1` internally to detect if more data exists).
-- `--disable-search`: Disable search tools
-- `--disable-datasource`: Disable datasource tools
-- `--disable-incident`: Disable incident tools
-- `--disable-prometheus`: Disable prometheus tools
-- `--disable-write`: Disable write tools (create/update operations)
-- `--disable-loki`: Disable loki tools
-- `--disable-elasticsearch`: Disable elasticsearch and opensearch tools
-- `--disable-quickwit`: Disable quickwit tools
-- `--disable-influxdb`: Disable InfluxDB tools
-- `--disable-alerting`: Disable alerting tools
-- `--disable-dashboard`: Disable dashboard tools
-- `--disable-oncall`: Disable oncall tools
-- `--disable-asserts`: Disable asserts tools
-- `--disable-sift`: Disable sift tools
-- `--disable-admin`: Disable admin tools
-- `--disable-pyroscope`: Disable pyroscope tools
-- `--disable-navigation`: Disable navigation tools
-- `--disable-rendering`: Disable rendering tools (panel/dashboard image export)
-- `--disable-snapshot`: Disable snapshot tools
-- `--disable-cloudwatch`: Disable CloudWatch tools
-- `--disable-examples`: Disable query examples tools
-- `--disable-clickhouse`: Disable ClickHouse tools
-- `--disable-snowflake`: Disable Snowflake tools
-- `--disable-runpanelquery`: Disable run panel query tools
-- `--disable-graphite`: Disable Graphite tools
-- `--disable-athena`: Disable Athena tools
-- `--disable-provisioning`: Disable provisioning tools
-
-### Read-Only Mode
-
-The `--disable-write` flag provides a way to run the MCP server in read-only mode, preventing any write operations to your Grafana instance. This is useful for scenarios where you want to provide safe, read-only access such as:
-
-- Using service accounts with limited read-only permissions
-- Providing AI assistants with observability data without modification capabilities
-- Running in production environments where write access should be restricted
-- Testing and development scenarios where you want to prevent accidental modifications
-
-When `--disable-write` is enabled, the following write operations are disabled:
-
-**Dashboard Tools:**
-- `update_dashboard`
-
-**Folder Tools:**
-- `create_folder`
-
-**Incident Tools:**
-- `create_incident`
-- `add_activity_to_incident`
-
-**Alerting Tools:**
-- `alerting_manage_rules` (create, update, delete operations)
-
-**Annotation Tools:**
-- `create_annotation`
-- `update_annotation`
-
-**Sift Tools:**
-- `find_error_pattern_logs` (creates investigations)
-- `find_slow_requests` (creates investigations)
-
-**Snapshot Tools:**
-- `create_snapshot`
-- `delete_snapshot`
-
-All read operations remain available, allowing you to query dashboards, run PromQL/LogQL queries, list resources, and retrieve data.
-
-**Client TLS Configuration (for Grafana connections):**
-- `--tls-cert-file`: Path to TLS certificate file for client authentication
-- `--tls-key-file`: Path to TLS private key file for client authentication
-- `--tls-ca-file`: Path to TLS CA certificate file for server verification
-- `--tls-skip-verify`: Skip TLS certificate verification (insecure)
-
-**Server TLS Configuration (streamable-http transport only):**
-- `--server.tls-cert-file`: Path to TLS certificate file for server HTTPS
-- `--server.tls-key-file`: Path to TLS private key file for server HTTPS
-
-## Usage
-
-This MCP server works with both local Grafana instances and Grafana Cloud. For Grafana Cloud, use your instance URL (e.g., `https://myinstance.grafana.net`) instead of `http://localhost:3000` in the configuration examples below.
-
-1. If using service account token authentication, create a service account in Grafana with enough permissions to use the tools you want to use,
-   generate a service account token, and copy it to the clipboard for use in the configuration file.
-   Follow the [Grafana service account documentation][service-account] for details on creating service account tokens.
-   Tip: If you're not comfortable configuring fine-grained RBAC scopes, a simpler (but less restrictive) option is to assign the built-in `Editor` role to the service account. This grants broad read/write access that covers most MCP server operations — use it when convenience outweighs strict least-privilege requirements.
-
-   > **Note:** The environment variable `GRAFANA_API_KEY` is deprecated and will be removed in a future version. Please migrate to using `GRAFANA_SERVICE_ACCOUNT_TOKEN` instead. The old variable name will continue to work for backward compatibility but will show deprecation warnings.
-
-#### Reading the service account token from a file
-
-Instead of passing the token inline via `GRAFANA_SERVICE_ACCOUNT_TOKEN`, you can point `GRAFANA_SERVICE_ACCOUNT_TOKEN_FILE` at a file path that contains the token. The file is read fresh on every request, so rotated tokens are picked up automatically without restarting the server.
-
-This is particularly useful in Kubernetes, where a Secret mounted as a volume is updated in place when the underlying Secret changes (typically within ~1 minute). Combined with the per-request client cache — which is keyed on the token value — a rotated token transparently produces a new client with no pod restart and no downtime:
-
-```yaml
-env:
-  - name: GRAFANA_SERVICE_ACCOUNT_TOKEN_FILE
-    value: /var/run/secrets/grafana/token
-volumeMounts:
-  - name: grafana-token
-    mountPath: /var/run/secrets/grafana
-    readOnly: true
-volumes:
-  - name: grafana-token
-    secret:
-      secretName: grafana-mcp-token
-```
-
-Surrounding whitespace (including a trailing newline) is trimmed from the file contents. If both `GRAFANA_SERVICE_ACCOUNT_TOKEN` and `GRAFANA_SERVICE_ACCOUNT_TOKEN_FILE` are set, the inline token takes precedence.
-
-### Multi-Organization Support
- 
-You can specify which organization to interact with using either:
-
-- **Environment variable:** Set `GRAFANA_ORG_ID` to the numeric organization ID
-- **HTTP header:** Set `X-Grafana-Org-Id` when using SSE or streamable HTTP transports (header takes precedence over environment variable - meaning you can set a default org as well).
-
-When an organization ID is provided, the MCP server will set the `X-Grafana-Org-Id` header on all requests to Grafana, ensuring that operations are performed within the specified organization context.
-
-**Example with organization ID:**
-
-```json
-{
-  "mcpServers": {
-    "grafana": {
-      "command": "mcp-grafana",
-      "args": [],
-      "env": {
-        "GRAFANA_URL": "http://localhost:3000",
-        "GRAFANA_USERNAME": "<your username>",
-        "GRAFANA_PASSWORD": "<your password>",
-        "GRAFANA_ORG_ID": "2"
-      }
-    }
-  }
-}
-```
-
-### Custom HTTP Headers
-
-You can add arbitrary HTTP headers to all Grafana API requests using the `GRAFANA_EXTRA_HEADERS` environment variable. The value should be a JSON object mapping header names to values.
-
-**Example with custom headers:**
-
-```json
-{
-  "mcpServers": {
-    "grafana": {
-      "command": "mcp-grafana",
-      "args": [],
-      "env": {
-        "GRAFANA_URL": "http://localhost:3000",
-        "GRAFANA_SERVICE_ACCOUNT_TOKEN": "<your token>",
-        "GRAFANA_EXTRA_HEADERS": "{\"X-Custom-Header\": \"custom-value\", \"X-Tenant-ID\": \"tenant-123\"}"
-      }
-    }
-  }
-}
-```
-
-### Forwarding Headers from the Client (SSE/Streamable-HTTP Only)
-
-When the MCP server runs behind a gateway or reverse proxy that handles SSO (e.g. an AWS ALB with OIDC), each user's session cookie must reach Grafana so it can associate the request with the authenticated user. The `GRAFANA_FORWARD_HEADERS` environment variable enables this by specifying a comma-separated allowlist of header names to copy from the **incoming** HTTP request to every outbound Grafana API request.
-
-This only applies when using SSE (`-t sse`) or streamable-http (`-t streamable-http`) transports. It has no effect in stdio mode.
-
-**Example: forward the session cookie**
-
-```json
-{
-  "env": {
-    "GRAFANA_URL": "https://grafana.internal",
-    "GRAFANA_SERVICE_ACCOUNT_TOKEN": "<your token>",
-    "GRAFANA_FORWARD_HEADERS": "Cookie"
-  }
-}
-```
-
-You can forward multiple headers by separating them with commas:
-
-```
-GRAFANA_FORWARD_HEADERS=Cookie,X-Session-Id
-```
-
-Forwarded headers are merged with any headers defined in `GRAFANA_EXTRA_HEADERS`. If a header name appears in both, the value from the incoming request takes precedence for that request.
-
-2. You have several options to install `mcp-grafana`:
-
-   - **uvx (recommended)**: If you have [uv](https://docs.astral.sh/uv/getting-started/installation/) installed, no extra setup is needed — `uvx` will automatically download and run the server:
-
-     ```bash
-     uvx mcp-grafana
-     ```
-
-   - **Docker image**: Use the pre-built Docker image from Docker Hub.
-
-     **Important**: The Docker image's entrypoint is configured to run the MCP server in SSE mode by default, but most users will want to use STDIO mode for direct integration with AI assistants like Claude Desktop:
-
-     1. **STDIO Mode**: For stdio mode you must explicitly override the default with `-t stdio` and include the `-i` flag to keep stdin open:
-
-     ```bash
-     docker pull grafana/mcp-grafana
-     # For local Grafana:
-     docker run --rm -i -e GRAFANA_URL=http://localhost:3000 -e GRAFANA_SERVICE_ACCOUNT_TOKEN=<your service account token> grafana/mcp-grafana -t stdio
-     # For Grafana Cloud:
-     docker run --rm -i -e GRAFANA_URL=https://myinstance.grafana.net -e GRAFANA_SERVICE_ACCOUNT_TOKEN=<your service account token> grafana/mcp-grafana -t stdio
-     ```
-
-     2. **SSE Mode**: In this mode, the server runs as an HTTP server that clients connect to. You must expose port 8000 using the `-p` flag:
-
-     ```bash
-     docker pull grafana/mcp-grafana
-     docker run --rm -p 8000:8000 -e GRAFANA_URL=http://localhost:3000 -e GRAFANA_SERVICE_ACCOUNT_TOKEN=<your service account token> grafana/mcp-grafana
-     ```
-
-     3. **Streamable HTTP Mode**: In this mode, the server operates as an independent process that can handle multiple client connections. You must expose port 8000 using the `-p` flag: For this mode you must explicitly override the default with `-t streamable-http`
-
-     ```bash
-     docker pull grafana/mcp-grafana
-     docker run --rm -p 8000:8000 -e GRAFANA_URL=http://localhost:3000 -e GRAFANA_SERVICE_ACCOUNT_TOKEN=<your service account token> grafana/mcp-grafana -t streamable-http
-     ```
-
-     For HTTPS streamable HTTP mode with server TLS certificates:
-
-     ```bash
-     docker pull grafana/mcp-grafana
-     docker run --rm -p 8443:8443 \
-       -v /path/to/certs:/certs:ro \
-       -e GRAFANA_URL=http://localhost:3000 \
-       -e GRAFANA_SERVICE_ACCOUNT_TOKEN=<your service account token> \
-       grafana/mcp-grafana \
-       -t streamable-http \
-       -addr :8443 \
-       --server.tls-cert-file /certs/server.crt \
-       --server.tls-key-file /certs/server.key
-     ```
-
-   - **Download binary**: Download the latest release of `mcp-grafana` from the [releases page](https://github.com/grafana/mcp-grafana/releases) and place it in your `$PATH`.
-
-   - **Build from source**: If you have a Go toolchain installed you can also build and install it from source, using the `GOBIN` environment variable
-     to specify the directory where the binary should be installed. This should also be in your `$PATH`.
-
-     ```bash
-     GOBIN="$HOME/go/bin" go install github.com/grafana/mcp-grafana/cmd/mcp-grafana@latest
-     ```
-
-   - **Deploy to Kubernetes using Helm**: use the [Helm chart from the Grafana helm-charts repository](https://github.com/grafana/helm-charts/tree/main/charts/grafana-mcp)
-
-     ```bash
-     helm repo add grafana https://grafana.github.io/helm-charts
-     helm install --set grafana.apiKey=<Grafana_ApiKey> --set grafana.url=<GrafanaUrl> my-release grafana/grafana-mcp
-     ```
-
-
-3. Add the server configuration to your client configuration file. For example, for Claude Desktop:
-
-   **If using uvx:**
-
-   ```json
-   {
-     "mcpServers": {
-       "grafana": {
-         "command": "uvx",
-         "args": ["mcp-grafana"],
-         "env": {
-           "GRAFANA_URL": "http://localhost:3000",
-           "GRAFANA_SERVICE_ACCOUNT_TOKEN": "<your service account token>"
-         }
-       }
-     }
-   }
-   ```
-
-   **If using the binary:**
-
-   ```json
-   {
-     "mcpServers": {
-       "grafana": {
-         "command": "mcp-grafana",
-         "args": [],
-         "env": {
-           "GRAFANA_URL": "http://localhost:3000",  // Or "https://myinstance.grafana.net" for Grafana Cloud
-           "GRAFANA_SERVICE_ACCOUNT_TOKEN": "<your service account token>",
-           // If using username/password authentication
-           "GRAFANA_USERNAME": "<your username>",
-           "GRAFANA_PASSWORD": "<your password>",
-           // Optional: specify organization ID for multi-org support
-           "GRAFANA_ORG_ID": "1"
-         }
-       }
-     }
-   }
-   ```
-
-> Note: if you see `Error: spawn mcp-grafana ENOENT` in Claude Desktop, you need to specify the full path to `mcp-grafana`.
-
-**If using Docker:**
-
-```json
-{
-  "mcpServers": {
-    "grafana": {
-      "command": "docker",
+      "command": "/home/work/22808950@sigma.sbrf.ru/GigaIdeProject/mcp-grafana/dist/mcp-grafana",
       "args": [
-        "run",
-        "--rm",
-        "-i",
-        "-e",
-        "GRAFANA_URL",
-        "-e",
-        "GRAFANA_SERVICE_ACCOUNT_TOKEN",
-        "grafana/mcp-grafana",
-        "-t",
+        "--transport",
         "stdio"
       ],
       "env": {
-        "GRAFANA_URL": "http://localhost:3000",  // Or "https://myinstance.grafana.net" for Grafana Cloud
-        "GRAFANA_SERVICE_ACCOUNT_TOKEN": "<your service account token>",
-        // If using username/password authentication
-        "GRAFANA_USERNAME": "<your username>",
-        "GRAFANA_PASSWORD": "<your password>",
-        // Optional: specify organization ID for multi-org support
-        "GRAFANA_ORG_ID": "1"
-      }
+        "GRAFANA_URL": "http://host:3000",
+        "GRAFANA_SERVICE_ACCOUNT_TOKEN": "$secret:grafana/GRAFANA_SERVICE_ACCOUNT_TOKEN"
+      },
+      "timeout": 600000
     }
   }
 }
 ```
 
-> Note: The `-t stdio` argument is essential here because it overrides the default SSE mode in the Docker image.
+- `command` — абсолютный путь к собранному бинарному файлу. Замените его, если репозиторий находится в другом каталоге.
+- `args` — аргументы запуска; `--transport stdio` задаёт подключение через стандартные потоки процесса.
+- `GRAFANA_URL` — адрес вашей Grafana. Замените `host` на имя сервера.
+- `$secret:grafana/GRAFANA_SERVICE_ACCOUNT_TOKEN` — ссылка на секрет с токеном, настроенный в GigaCode CLI.
+- `timeout: 600000` — таймаут MCP-клиента, равный 10 минутам.
 
-**Using VSCode with remote MCP server**
+GigaCode CLI выступает MCP-клиентом: самостоятельно запускает бинарный файл и обменивается с ним MCP-сообщениями через stdio.
 
-If you're using VSCode and running the MCP server in SSE mode (which is the default when using the Docker image without overriding the transport), make sure your `.vscode/settings.json` includes the following:
+---
 
-```json
-"mcp": {
-  "servers": {
-    "grafana": {
-      "type": "sse",
-      "url": "http://localhost:8000/sse"
-    }
-  }
-}
+## ⚙️ Конфигурация
+
+### Переменные окружения
+
+Передаются бинарному файлу через блок `env` в конфигурации GigaCode CLI.
+
+| Переменная | Обязательная | По умолчанию | Описание |
+|---|---|---|---|
+| `GRAFANA_URL` | для удалённой Grafana | `http://localhost:3000` | Базовый URL Grafana |
+| `GRAFANA_SERVICE_ACCOUNT_TOKEN` | для token auth | — | Токен service account |
+| `GRAFANA_SERVICE_ACCOUNT_TOKEN_FILE` | нет | — | Путь к файлу с токеном; используется, если inline-токен не задан |
+| `GRAFANA_USERNAME` | для Basic Auth | — | Имя пользователя Grafana |
+| `GRAFANA_PASSWORD` | для Basic Auth | — | Пароль пользователя Grafana |
+| `GRAFANA_ORG_ID` | нет | организация по умолчанию | Числовой ID организации Grafana |
+| `GRAFANA_EXTRA_HEADERS` | нет | — | Дополнительные заголовки запросов к Grafana в виде JSON-объекта |
+
+> `GRAFANA_API_KEY` поддерживается для обратной совместимости, но устарел. Используйте `GRAFANA_SERVICE_ACCOUNT_TOKEN`.
+
+Пример `GRAFANA_EXTRA_HEADERS`: `{"X-Tenant-ID":"tenant-123","X-Custom-Header":"value"}`.
+
+### Основные CLI-флаги
+
+| Флаг | По умолчанию | Описание |
+|---|---|---|
+| `--transport` | `stdio` | В конфигурации GigaCode CLI явно укажите `--transport stdio` |
+| `--enabled-tools` | см. [Фильтрация инструментов](#-конфигурация-инструментов) | Список категорий через запятую, заменяющий стандартный набор |
+| `--disable-<category>` | `false` | Отключить категорию, например `--disable-oncall` |
+| `--disable-write` | `false` | Ограничить встроенные операции записи |
+| `--max-loki-log-limit` | `100` | Максимум строк в одном ответе `query_loki_logs` |
+| `--log-level` | `info` | Уровень логирования: `debug`, `info`, `warn`, `error` |
+| `--debug` | `false` | Подробные HTTP-логи запросов к Grafana; включает уровень `debug` |
+| `--slow-request-threshold` | `0` | Порог журнала медленных MCP-запросов, например `500ms` или `5s`; `0` отключает |
+| `--slow-request-log-level` | `warn` | Уровень медленных запросов: `info` или `warn` |
+| `--version` | — | Вывести версию и завершить работу |
+
+> Для определения усечения ответа Loki инструмент запрашивает `limit + 1` строк. Задавайте `--max-loki-log-limit` минимум на 1 меньше серверного `max_entries_limit_per_query` Loki.
+
+TLS-флаги приведены в разделе [Безопасность](#-безопасность). Все параметры собранного бинарного файла доступны через `./dist/mcp-grafana --help`.
+
+---
+
+## 🔑 Аутентификация
+
+### Service account token (рекомендуется)
+
+1. Откройте Grafana и перейдите в **Administration → Users and access → Service accounts**.
+2. Создайте service account и назначьте права на нужные ресурсы.
+3. Создайте токен и сохраните его.
+4. Сохраните токен в секрете GigaCode CLI `grafana/GRAFANA_SERVICE_ACCOUNT_TOKEN`. В блоке `env` используйте ссылку `$secret:grafana/GRAFANA_SERVICE_ACCOUNT_TOKEN`.
+
+Подробная инструкция: [Grafana service accounts](https://grafana.com/docs/grafana/latest/administration/service-accounts/#add-a-token-to-a-service-account-in-grafana).
+
+Для чтения нужны соответствующие read/query-права; для изменения ресурсов — write-права. RBAC проверяет **действие и scope**: например, `datasources:query` со scope `datasources:uid:prometheus-prod` или `dashboards:read` со scope `dashboards:uid:monitoring-dashboard`.
+
+Встроенная роль `Editor` даёт широкий доступ на чтение и запись. Для ограниченного доступа назначайте только необходимые права. Grafana Incident и Sift используют базовые роли: `Viewer` для чтения и `Editor` для операций записи.
+
+### Токен из файла
+
+Задайте `GRAFANA_SERVICE_ACCOUNT_TOKEN_FILE`, например `/var/run/secrets/grafana/token`. Файл перечитывается при запросах; ротация токена не требует перезапуска сервера. Пробелы и перевод строки по краям удаляются.
+
+Если одновременно задан `GRAFANA_SERVICE_ACCOUNT_TOKEN`, он имеет приоритет.
+
+### Basic Auth
+
+Вместо токена задайте `GRAFANA_USERNAME` и `GRAFANA_PASSWORD`. Для выбора организации используйте `GRAFANA_ORG_ID`; это не расширяет права аккаунта.
+
+---
+
+## 🛠️ Инструменты
+
+Ниже перечислены встроенные инструменты. Набор, доступный клиенту, зависит от CLI-флагов, прав Grafana и установленных интеграций.
+
+### 📖 Чтение и диагностика
+
+| Инструмент | Описание | Пример запроса |
+|---|---|---|
+| `search_dashboards` | Поиск дашбордов | «Найди дашборд payments» |
+| `search_folders` | Поиск папок | «Покажи папки команды backend» |
+| `get_dashboard_summary` | Краткая сводка без полного JSON | «Какие панели есть на дашборде?» |
+| `get_dashboard_property` | Выборка свойств через JSONPath | «Покажи названия панелей» |
+| `get_dashboard_by_uid` | Полный JSON дашборда | «Покажи конфигурацию дашборда по UID» |
+| `get_dashboard_panel_queries` | Запросы панелей и их datasources | «Какие запросы использует дашборд?» |
+| `list_datasources`, `get_datasource` | Список и параметры источников данных | «Какие Prometheus подключены?» |
+| `query_prometheus` | Instant/range-запросы PromQL | «Покажи RPS за последний час» |
+| `query_prometheus_histogram` | Процентили гистограмм | «Рассчитай p95 и p99 latency» |
+| `list_prometheus_metric_names` | Имена метрик | «Найди метрики HTTP-запросов» |
+| `list_prometheus_metric_metadata` | Типы и описания метрик | «Что означает эта метрика?» |
+| `list_prometheus_label_names`, `list_prometheus_label_values` | Метки и их значения | «Какие значения есть у label service?» |
+| `query_loki_logs` | Логи и метрические запросы LogQL | «Найди ошибки backend за 15 минут» |
+| `list_loki_label_names`, `list_loki_label_values` | Метки логов | «Какие приложения отправляют логи?» |
+| `query_loki_stats` | Статистика потоков логов | «Сколько данных попадает под этот selector?» |
+| `query_loki_patterns` | Повторяющиеся шаблоны логов | «Покажи типичные сообщения сервиса» |
+| `analyze_loki_labels` | Анализ качества и кардинальности меток | «Проверь метки Loki» |
+| `list_pyroscope_profile_types` | Доступные типы профилей | «Какие профили доступны?» |
+| `list_pyroscope_label_names`, `list_pyroscope_label_values` | Метки профилей | «Какие сервисы профилируются?» |
+| `query_pyroscope` | Профили и метрики Pyroscope | «Покажи профиль CPU сервиса» |
+| `alerting_manage_routing` | Notification policies, contact points и time intervals | «Куда отправляются уведомления об алертах?» |
+| `list_incidents`, `get_incident` | Поиск и детали инцидентов | «Покажи активные инциденты» |
+| `list_sift_investigations`, `get_sift_investigation`, `get_sift_analysis` | Расследования и результаты Sift | «Что обнаружило расследование?» |
+| `list_oncall_schedules`, `get_oncall_shift`, `get_current_oncall_users` | Расписания, смены и дежурные | «Кто сейчас дежурит?» |
+| `list_oncall_teams`, `list_oncall_users` | Команды и пользователи OnCall | «Покажи команды OnCall» |
+| `list_alert_groups`, `get_alert_group` | Группы оповещений OnCall | «Покажи открытые alert groups» |
+| `get_assertions` | Сводка Asserts для сущности | «Покажи assertions для сервиса» |
+| `get_annotations`, `get_annotation_tags` | Аннотации и теги | «Какие деплои отмечены на дашборде?» |
+| `list_snapshots`, `get_snapshot` | Снимки дашбордов | «Покажи сохранённые snapshots» |
+| `get_panel_image` | PNG панели или дашборда | «Сделай изображение панели latency» |
+| `list_provisioning_repositories` | Репозитории provisioning и состояние синхронизации | «Какие git-sync репозитории подключены?» |
+| `validate_provisioning_file` | Проверка файла provisioning без применения | «Проверь дашборд из ветки feature» |
+| `get_plugin`, `search_plugin_information` | Проверка плагина и поиск в каталоге | «Найди плагин для ClickHouse» |
+| `suggest_loki_alloy_label_config` | Генерация фрагмента Alloy для правил меток | «Подготовь конфигурацию допустимых labels» |
+
+### ✏️ Запись
+
+Эти инструменты отключаются флагом `--disable-write`.
+
+| Инструмент | Описание | Пример запроса |
+|---|---|---|
+| `update_dashboard` | Создание, полная замена или точечное изменение дашборда | «Добавь панель RPS на дашборд» |
+| `create_folder` | Создание папки | «Создай папку команды backend» |
+| `create_incident` | Создание инцидента | «Создай инцидент о недоступности API» |
+| `add_activity_to_incident` | Запись в журнал инцидента | «Добавь результат проверки в инцидент» |
+| `create_annotation` | Создание аннотации, включая Graphite-формат | «Отметь время деплоя на дашборде» |
+| `update_annotation` | Частичное обновление аннотации | «Исправь текст аннотации» |
+| `find_error_pattern_logs` | Запуск Sift-анализа ошибок с созданием расследования | «Исследуй рост ошибок в логах» |
+| `find_slow_requests` | Запуск Sift-анализа медленных запросов | «Найди медленные запросы в Tempo» |
+| `create_snapshot`, `delete_snapshot` | Создание и удаление снимков | «Создай snapshot дашборда» |
+| `get_panel_image_and_save` | Сохранение PNG на машине MCP-сервера | «Сохрани панель в файл» |
+| `install_plugin` | Установка плагина в Grafana | «Установи плагин по его ID» |
+
+### 🔀 Инструменты с режимами чтения и записи
+
+| Инструмент | Обычный режим | С `--disable-write` |
+|---|---|---|
+| `alerting_manage_rules` | Просмотр, версии, создание, изменение и удаление alert rules | Только операции чтения |
+| `grafana_api_request` | Запросы к Grafana API с опциональным jq-фильтром ответа | Только GET |
+| `generate_deeplink` | Ссылки на дашборды, панели и Explore; опциональное сокращение URL | Полные ссылки; `shorten=true` игнорируется |
+
+### 🧩 Дополнительные категории
+
+По умолчанию отключены. Для подключения укажите нужную категорию в `--enabled-tools`.
+
+| Категория | Инструменты | Назначение |
+|---|---|---|
+| `runpanelquery` | `run_panel_query` | Выполнение запросов панелей с диапазоном времени и переменными |
+| `examples` | `get_query_examples` | Примеры запросов для разных datasources |
+| `influxdb` | `query_influxdb` | InfluxQL (v1) и Flux (v2) |
+| `clickhouse` | `list_clickhouse_tables`, `describe_clickhouse_table`, `query_clickhouse` | Таблицы, схемы и SQL с макросами Grafana |
+| `cloudwatch` | `list_cloudwatch_namespaces`, `list_cloudwatch_metrics`, `list_cloudwatch_dimensions`, `query_cloudwatch` | Метрики AWS CloudWatch |
+| `graphite` | `query_graphite`, `list_graphite_metrics`, `list_graphite_tags`, `query_graphite_density` | Метрики и теги Graphite |
+| `athena` | `list_athena_catalogs`, `list_athena_databases`, `list_athena_tables`, `describe_athena_table`, `query_athena` | Каталоги, схемы и SQL Amazon Athena |
+| `snowflake` | `list_snowflake_tables`, `describe_snowflake_table`, `query_snowflake` | Таблицы и SQL Snowflake, включая `SNOWFLAKE.TELEMETRY.EVENTS` |
+| `elasticsearch` | `query_elasticsearch` | Elasticsearch/OpenSearch: Lucene и Query DSL |
+| `quickwit` | `query_quickwit` | Поиск логов и документов в Quickwit |
+| `admin` | `list_teams`, `list_users_by_org`, `list_all_roles`, `get_role_details`, `get_role_assignments`, `list_user_roles`, `list_team_roles`, `get_resource_permissions`, `get_resource_description` | Пользователи, команды, роли и права |
+
+Для SQL-источников запросы идут через datasource Grafana: доступ к базе настраивается в самой Grafana. Snowflake требует соответствующего Enterprise datasource plugin.
+
+Справочная таблица инструментов и RBAC: [MCP tools reference](docs/sources/reference/mcp-tools-table.md).
+
+> **Экономия контекста:** Начинайте с `get_dashboard_summary`. Для отдельных свойств используйте `get_dashboard_property`, для небольших правок — `update_dashboard` с `uid` и `operations`. Полный JSON через `get_dashboard_by_uid` нужен только при работе со всей конфигурацией.
+
+---
+
+## 🎛️ Конфигурация инструментов
+
+Инструменты выбираются **по категориям через CLI-флаги**. Значение `--enabled-tools` полностью заменяет стандартный список; `--disable-<category>` имеет приоритет и отключает категорию даже при её наличии в списке.
+
+Стандартные категории встроенных инструментов:
+
+```text
+search,datasource,incident,prometheus,loki,alerting,dashboard,folder,oncall,asserts,sift,pyroscope,navigation,annotations,rendering,snapshot,plugin,api,config,provisioning
 ```
 
-For HTTPS streamable HTTP mode with server TLS certificates:
-
-```json
-"mcp": {
-  "servers": {
-    "grafana": {
-      "type": "sse",
-      "url": "https://localhost:8443/sse"
-    }
-  }
-}
-```
-
-### Debug Mode
-
-You can enable debug mode for the Grafana transport by adding the `-debug` flag to the command. This will provide detailed logging of HTTP requests and responses between the MCP server and the Grafana API, which can be helpful for troubleshooting.
-
-To use debug mode with the Claude Desktop configuration, update your config as follows:
-
-**If using the binary:**
-
-```json
-{
-  "mcpServers": {
-    "grafana": {
-      "command": "mcp-grafana",
-      "args": ["-debug"],
-      "env": {
-        "GRAFANA_URL": "http://localhost:3000",  // Or "https://myinstance.grafana.net" for Grafana Cloud
-        "GRAFANA_SERVICE_ACCOUNT_TOKEN": "<your service account token>"
-      }
-    }
-  }
-}
-```
-
-**If using Docker:**
-
-```json
-{
-  "mcpServers": {
-    "grafana": {
-      "command": "docker",
-      "args": [
-        "run",
-        "--rm",
-        "-i",
-        "-e",
-        "GRAFANA_URL",
-        "-e",
-        "GRAFANA_SERVICE_ACCOUNT_TOKEN",
-        "grafana/mcp-grafana",
-        "-t",
-        "stdio",
-        "-debug"
-      ],
-      "env": {
-        "GRAFANA_URL": "http://localhost:3000",  // Or "https://myinstance.grafana.net" for Grafana Cloud
-        "GRAFANA_SERVICE_ACCOUNT_TOKEN": "<your service account token>"
-      }
-    }
-  }
-}
-```
-
-> Note: As with the standard configuration, the `-t stdio` argument is required to override the default SSE mode in the Docker image.
-
-### TLS Configuration
-
-If your Grafana instance is behind mTLS or requires custom TLS certificates, you can configure the MCP server to use custom certificates. The server supports the following TLS configuration options:
-
-- `--tls-cert-file`: Path to TLS certificate file for client authentication
-- `--tls-key-file`: Path to TLS private key file for client authentication
-- `--tls-ca-file`: Path to TLS CA certificate file for server verification
-- `--tls-skip-verify`: Skip TLS certificate verification (insecure, use only for testing)
-
-**Example with client certificate authentication:**
-
-```json
-{
-  "mcpServers": {
-    "grafana": {
-      "command": "mcp-grafana",
-      "args": [
-        "--tls-cert-file",
-        "/path/to/client.crt",
-        "--tls-key-file",
-        "/path/to/client.key",
-        "--tls-ca-file",
-        "/path/to/ca.crt"
-      ],
-      "env": {
-        "GRAFANA_URL": "https://secure-grafana.example.com",
-        "GRAFANA_SERVICE_ACCOUNT_TOKEN": "<your service account token>"
-      }
-    }
-  }
-}
-```
-
-**Example with Docker:**
-
-```json
-{
-  "mcpServers": {
-    "grafana": {
-      "command": "docker",
-      "args": [
-        "run",
-        "--rm",
-        "-i",
-        "-v",
-        "/path/to/certs:/certs:ro",
-        "-e",
-        "GRAFANA_URL",
-        "-e",
-        "GRAFANA_SERVICE_ACCOUNT_TOKEN",
-        "grafana/mcp-grafana",
-        "-t",
-        "stdio",
-        "--tls-cert-file",
-        "/certs/client.crt",
-        "--tls-key-file",
-        "/certs/client.key",
-        "--tls-ca-file",
-        "/certs/ca.crt"
-      ],
-      "env": {
-        "GRAFANA_URL": "https://secure-grafana.example.com",
-        "GRAFANA_SERVICE_ACCOUNT_TOKEN": "<your service account token>"
-      }
-    }
-  }
-}
-```
-
-The TLS configuration is applied to all HTTP clients used by the MCP server, including:
-
-- The main Grafana OpenAPI client
-- Prometheus datasource clients
-- Loki datasource clients
-- Incident management clients
-- Sift investigation clients
-- Alerting clients
-- Asserts clients
-
-**Direct CLI Usage Examples:**
-
-For testing with self-signed certificates:
+Оставить основные встроенные инструменты для диагностики:
 
 ```bash
-./mcp-grafana --tls-skip-verify -debug
+./dist/mcp-grafana --transport stdio --enabled-tools search,datasource,dashboard,prometheus,loki,alerting --disable-write
 ```
 
-With client certificate authentication:
+Отключить отдельные категории, сохранив остальные стандартные:
 
 ```bash
-./mcp-grafana \
-  --tls-cert-file /path/to/client.crt \
-  --tls-key-file /path/to/client.key \
-  --tls-ca-file /path/to/ca.crt \
-  -debug
+./dist/mcp-grafana --transport stdio --disable-oncall --disable-sift --disable-asserts
 ```
 
-With custom CA certificate only:
+Сохранить стандартные категории и добавить выполнение запросов панелей:
 
 ```bash
-./mcp-grafana --tls-ca-file /path/to/ca.crt
+./dist/mcp-grafana --transport stdio --enabled-tools search,datasource,incident,prometheus,loki,alerting,dashboard,folder,oncall,asserts,sift,pyroscope,navigation,annotations,rendering,snapshot,plugin,api,config,provisioning,runpanelquery
 ```
 
-**Programmatic Usage:**
+В конфигурации GigaCode CLI добавляйте флаги в массив `args`, сохраняя `"--transport", "stdio"`. Например, для ограничения записи: `"args": ["--transport", "stdio", "--disable-write"]`.
 
-If you're using this library programmatically, you can also create TLS-enabled context functions:
+> **Режим чтения:** `--disable-write` ограничивает встроенные операции записи. Права в Grafana и источниках данных настраиваются отдельно.
 
-```go
-// Using struct literals
-tlsConfig := &mcpgrafana.TLSConfig{
-    CertFile: "/path/to/client.crt",
-    KeyFile:  "/path/to/client.key",
-    CAFile:   "/path/to/ca.crt",
-}
-grafanaConfig := mcpgrafana.GrafanaConfig{
-    Debug:     true,
-    TLSConfig: tlsConfig,
-}
-contextFunc := mcpgrafana.ComposedStdioContextFunc(grafanaConfig)
+---
 
-// Or inline
-grafanaConfig := mcpgrafana.GrafanaConfig{
-    Debug: true,
-    TLSConfig: &mcpgrafana.TLSConfig{
-        CertFile: "/path/to/client.crt",
-        KeyFile:  "/path/to/client.key",
-        CAFile:   "/path/to/ca.crt",
-    },
-}
-contextFunc := mcpgrafana.ComposedStdioContextFunc(grafanaConfig)
-```
+## 🔒 Безопасность
 
-**URL validation when wiring your own HTTP server:**
+- 🔑 **Права доступа** — выдавайте service account только необходимые действия и scopes; ограничивайте доступ к конкретным dashboards, folders и datasources.
+- 🎛️ **Ограничение действий** — используйте `--disable-write` и включайте только нужные категории инструментов.
+- 🔐 **TLS к Grafana** — проверка сертификата включена по умолчанию. Для корпоративного CA используйте `--tls-ca-file`; для mTLS добавьте клиентский сертификат и ключ.
+- 🙈 **Debug-логи** — значения заголовков `Authorization`, `X-Access-Token`, `X-Grafana-Id` и `Cookie` маскируются. Это не гарантирует скрытие всех чувствительных данных в ответах Grafana или произвольных дополнительных заголовках.
+- 📁 **Локальные файлы** — `get_panel_image_and_save` сохраняет PNG на машине, где GigaCode CLI запускает бинарный файл.
 
-When library consumers wire mcp-grafana's context functions into their own `http.Server`, install `ValidateGrafanaURLMiddleware` to reject malformed `X-Grafana-URL` headers with 400 Bad Request (matching the binary's behavior):
+### TLS-конфигурация
 
-```go
-mux.Handle(path, mcpgrafana.ValidateGrafanaURLMiddleware(yourMCPHandler))
-```
+| Флаг | По умолчанию | Назначение |
+|---|---|---|
+| `--tls-ca-file` | системные CA | CA для проверки сертификата Grafana |
+| `--tls-cert-file` | — | Клиентский сертификат для mTLS к Grafana |
+| `--tls-key-file` | — | Клиентский приватный ключ для mTLS к Grafana |
+| `--tls-skip-verify` | `false` | Отключить проверку сертификата Grafana; только для тестирования |
 
-When calling `NewGrafanaClient` directly (stdio or programmatic construction), pre-validate untrusted URLs to avoid a reachable panic:
-
-```go
-if err := mcpgrafana.ValidateGrafanaURL(urlFromHeader); err != nil {
-    http.Error(w, err.Error(), http.StatusBadRequest)
-    return
-}
-client := mcpgrafana.NewGrafanaClient(ctx, urlFromHeader, apiKey, nil)
-```
-
-Both patterns share `ValidateGrafanaURL` as the single validator.
-
-### Server TLS Configuration (Streamable HTTP Transport Only)
-
-When using the streamable HTTP transport (`-t streamable-http`), you can configure the MCP server to serve HTTPS instead of HTTP. This is useful when you need to secure the connection between your MCP client and the server itself.
-
-The server supports the following TLS configuration options for the streamable HTTP transport:
-
-- `--server.tls-cert-file`: Path to TLS certificate file for server HTTPS (required for TLS)
-- `--server.tls-key-file`: Path to TLS private key file for server HTTPS (required for TLS)
-
-**Note**: These flags are completely separate from the client TLS flags documented above. The client TLS flags configure how the MCP server connects to Grafana, while these server TLS flags configure how clients connect to the MCP server when using streamable HTTP transport.
-
-**Example with HTTPS streamable HTTP server:**
+Пример запуска бинарного файла с корпоративным CA для соединения с Grafana:
 
 ```bash
-./mcp-grafana \
-  -t streamable-http \
-  --server.tls-cert-file /path/to/server.crt \
-  --server.tls-key-file /path/to/server.key \
-  -addr :8443
+./dist/mcp-grafana --transport stdio --tls-ca-file /path/to/grafana-ca.crt
 ```
 
-This would start the MCP server on HTTPS port 8443. Clients would then connect to `https://localhost:8443/` instead of `http://localhost:8000/`.
+Для запуска из GigaCode CLI добавьте `"--tls-ca-file", "/path/to/grafana-ca.crt"` в массив `args`. URL Grafana и credentials передаются через `env`.
 
-**Docker example with server TLS:**
+### Логи и телеметрия
+
+Сервер пишет логи в **stderr** и не отправляет собственные логи, traces, события использования или метрики в удалённый telemetry collector, включая запуск и завершение работы. Переменные `OTEL_EXPORTER_OTLP_*` не включают удалённый экспорт; CLI-флага для него нет.
+
+Эта политика относится к телеметрии MCP-процесса. Рабочие запросы к Grafana и публичному каталогу плагинов, а также ответы MCP-клиенту выполняются по назначению. Передача данных самим AI-клиентом, Grafana, системными агентами и внешним сборщиком логов настраивается отдельно. При использовании Go SDK ответственность за подключённые logger, transport и OpenTelemetry providers лежит на вызывающем приложении.
+
+---
+
+## 📈 Мониторинг сервера
+
+### Логи
+
+Диагностика процесса доступна через stderr-логи в MCP-клиенте. Уровень задаётся флагом `--log-level`; для подробных запросов к Grafana используйте `--debug`.
+
+### Медленные запросы
 
 ```bash
-docker run --rm -p 8443:8443 \
-  -v /path/to/certs:/certs:ro \
-  -e GRAFANA_URL=http://localhost:3000 \
-  -e GRAFANA_SERVICE_ACCOUNT_TOKEN=<your service account token> \
-  grafana/mcp-grafana \
-  -t streamable-http \
-  -addr :8443 \
-  --server.tls-cert-file /certs/server.crt \
-  --server.tls-key-file /certs/server.key
+./dist/mcp-grafana --transport stdio --slow-request-threshold 500ms --slow-request-log-level warn
 ```
 
-### Health Check Endpoint
+Для использования в GigaCode CLI добавьте эти флаги в массив `args`. Запись содержит метод MCP, длительность, порог, имя инструмента для `tools/call` и сведения об ошибке при наличии.
 
-When using the SSE (`-t sse`) or streamable HTTP (`-t streamable-http`) transports, the MCP server exposes a health check endpoint at `/healthz`. This endpoint can be used by load balancers, monitoring systems, or orchestration platforms to verify that the server is running and accepting connections.
+---
 
-**Endpoint:** `GET /healthz`
+## ❓ Troubleshooting
 
-**Response:**
-- Status Code: `200 OK`
-- Body: `ok`
+| Симптом | Возможная причина | Решение |
+|---|---|---|
+| Бинарный файл не найден | Файл не собран или указан неверный путь в `command` | Выполните сборку и укажите абсолютный путь к `dist/mcp-grafana` |
+| `Permission denied` при запуске | Нет права на выполнение файла или доступа к каталогу | Проверьте права пользователя, от которого запущен GigaCode CLI, на бинарный файл и каталог |
+| MCP-сервер недоступен в GigaCode CLI | Ошибка JSON или неверный формат конфигурации клиента | Проверьте синтаксис, путь к программе и логи GigaCode CLI |
+| `401 Unauthorized` | Неверный, истёкший или отозванный токен | Проверьте токен и URL Grafana; создайте новый токен при необходимости |
+| `403 Forbidden` | Не хватает прав или выбран неверный scope/organization | Проверьте роль, RBAC-действия, scopes и `GRAFANA_ORG_ID` |
+| `id is invalid` при получении datasource по UID | Несовместимая версия Grafana | Используйте Grafana 9.0+; проверьте версию и endpoint |
+| Ошибка проверки TLS-сертификата | Недоверенный CA или неверное имя сервера | Передайте CA через `--tls-ca-file` и проверьте hostname сертификата |
+| Grafana недоступна | Неверный адрес или нет сетевого доступа с машины, где запущен GigaCode CLI | Проверьте `GRAFANA_URL` и доступность Grafana с машины, где запускается бинарный файл |
+| Нет ClickHouse, Snowflake или других дополнительных инструментов | Категория выключена по умолчанию | Добавьте категорию в полный список `--enabled-tools` |
+| Нет инструментов записи | Передан `--disable-write` или отключена категория | Проверьте аргументы запуска и права Grafana |
+| Не получается получить PNG | Grafana Image Renderer не настроен | Установите и настройте renderer; проверьте доступ к дашборду |
+| Пустой результат запроса | Неверные datasource, labels, переменные или время | Проверьте запрос в Explore и укажите часовой пояс; время без offset трактуется как UTC |
+| Логи Loki обрезаны | Достигнут лимит строк | Уточните selector/диапазон или настройте `--max-loki-log-limit` с учётом серверного лимита |
 
-**Example usage:**
+Для диагностики добавьте `--debug` или `--slow-request-threshold 500ms`. Учитывайте, что логи могут содержать данные ответов Grafana.
+
+---
+
+## 🏗️ Разработка
+
+Требуются **Go 1.26.3+** и Make.
+
+| Команда | Описание |
+|---|---|
+| `make build` | Сборка бинарного файла в `dist/mcp-grafana` |
+| `make test`, `make test-unit` | Unit-тесты без внешних сервисов |
+| `make lint` | Проверки Go, JSONSchema-тегов и OpenAPI context propagation |
+| `make lint-jsonschema`, `make lint-openapi` | Отдельный запуск внутренних линтеров |
+
+Запуск unit-тестов без Make:
 
 ```bash
-# For streamable HTTP or SSE transport on default port
-curl http://localhost:8000/healthz
-
-# With custom address
-curl http://localhost:9090/healthz
+go test -v -tags unit ./...
 ```
 
-**Note:** The health check endpoint is only available when using SSE or streamable HTTP transports. It is not available when using the stdio transport (`-t stdio`), as stdio does not expose an HTTP server.
+Для подключения к Grafana соберите бинарный файл и настройте его запуск из GigaCode CLI, как описано в [Быстром старте](#-быстрый-старт).
 
-### Observability
+### Стек
 
-The MCP server provides local stderr logs and optional Prometheus metrics following the [OTel MCP semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/mcp/). It does not configure remote telemetry exporters.
+- **Go** — сервер и инструменты.
+- **mcp-go** — MCP-протокол и транспорты.
+- **Grafana OpenAPI client** — доступ к Grafana API.
+- **JSONSchema** — схемы параметров инструментов.
+- **Go testing** — тестирование.
+- **golangci-lint и внутренние линтеры** — проверки кода.
 
-#### Metrics
-
-When using the SSE or streamable HTTP transports, enable Prometheus metrics with the `--metrics` flag:
-
-```bash
-# Metrics served on the main server at /metrics
-./mcp-grafana -t streamable-http --metrics
-
-# Metrics served on a separate address
-./mcp-grafana -t streamable-http --metrics --metrics-address :9090
-```
-
-**Available Metrics:**
-
-| Metric | Type | Description |
-|--------|------|-------------|
-| `mcp_server_operation_duration_seconds` | Histogram | Duration of MCP operations (labels: `mcp_method_name`, `gen_ai_tool_name`, `error_type`, `network_transport`, `mcp_protocol_version`) |
-| `mcp_server_session_duration_seconds` | Histogram | Duration of MCP client sessions (labels: `network_transport`, `mcp_protocol_version`) |
-| `http_server_request_duration_seconds` | Histogram | Duration of HTTP server requests (from otelhttp) |
-
-**Note:** Metrics are only available when using SSE or streamable HTTP transports. They are not available with the stdio transport.
-
-#### Slow-request logging
-
-The `--slow-request-threshold` flag emits a structured log event whenever an MCP request (tool invocation, list, resource read, etc.) exceeds the given duration. It is useful for diagnosing slow queries and tool calls without drowning in the full debug log.
-
-```bash
-# Warn on any request slower than 500ms (works on all transports)
-./mcp-grafana -t streamable-http --slow-request-threshold 500ms
-
-# Same thing on stdio (the feature is transport-agnostic, unlike --metrics)
-./mcp-grafana -t stdio --slow-request-threshold 500ms
-
-# Log at INFO level instead of WARN (useful during investigation)
-./mcp-grafana -t streamable-http --slow-request-threshold 500ms --slow-request-log-level info
-```
-
-The log event carries these structured attributes:
-
-| Attribute | Description |
-|-----------|-------------|
-| `mcp.method` | The MCP method (e.g., `tools/call`, `tools/list`, `resources/read`) |
-| `duration` | Observed request duration |
-| `threshold` | Configured threshold |
-| `tool` | Tool name (only present for `tools/call` methods) |
-| `error` | Error value, when the request failed (best-effort context; content is controlled by upstream error wrapping) |
-| `error.type` | Bounded-cardinality error classification (`_OTHER` for untyped errors) |
-
-Slow-request logging works on all transports (including stdio) and does not require `--metrics`. The default threshold of `0` disables it entirely. Proxied tools flow through `tools/call` and are covered automatically.
-
-#### Local logs and remote telemetry policy
-
-Logs are written to stderr. `--log-level`, `--debug`, and slow-request logging remain available. The server does not send logs, traces, usage events, or metrics to a telemetry collector, including during startup and shutdown.
-
-`OTEL_EXPORTER_OTLP_*` environment variables, including signal-specific traces, logs, and metrics settings, cannot enable remote telemetry. There is no flag to enable remote export. OpenTelemetry instrumentation remains for local metrics; the application does not install a trace or log exporter.
-
-Prometheus metrics are disabled by default. Enabling `--metrics` exposes data to anyone with network access to the configured HTTP endpoint. Keep that endpoint on a trusted interface and restrict network access. Stdio opens no HTTP or metrics listener, even if metrics flags are supplied.
-
-This policy covers the MCP process's own telemetry. Functional requests to Grafana, datasource MCP endpoints, and the public plugin catalog remain available, as do responses to the MCP client. Your MCP/AI client, Grafana, operating-system agents, or a log collector can independently transmit data; configure those components separately. Library consumers that inject their own logger, transport, or OpenTelemetry providers are responsible for those integrations.
-
-**Docker example with local metrics:**
-
-```bash
-docker run --rm -p 127.0.0.1:8000:8000 \
-  -e GRAFANA_URL=http://grafana:3000 \
-  -e GRAFANA_SERVICE_ACCOUNT_TOKEN=<your token> \
-  grafana/mcp-grafana \
-  -t streamable-http --metrics
-```
-
-## Troubleshooting
-
-### Grafana Version Compatibility
-
-If you encounter the following error when using datasource-related tools:
-
-```
-get datasource by uid : [GET /datasources/uid/{uid}][400] getDataSourceByUidBadRequest {"message":"id is invalid"}
-```
-
-This typically indicates that you are using a Grafana version earlier than 9.0. The `/datasources/uid/{uid}` API endpoint was introduced in Grafana 9.0, and datasource operations will fail on earlier versions.
-
-**Solution:** Upgrade your Grafana instance to version 9.0 or later to resolve this issue.
-
-## Development
-
-Contributions are welcome! Please open an issue or submit a pull request if you have any suggestions or improvements.
-
-This project is written in Go. Install Go following the instructions for your platform.
-
-To run the server locally in STDIO mode (which is the default for local development), use:
-
-```bash
-make run
-```
-
-To run the server locally in SSE mode, use:
-
-```bash
-go run ./cmd/mcp-grafana --transport sse
-```
-
-You can also run the server using the SSE transport inside a custom built Docker image. Just like the published Docker image, this custom image's entrypoint defaults to SSE mode. To build the image, use:
-
-```
-make build-image
-```
-
-And to run the image in SSE mode (the default), use:
-
-```
-docker run -it --rm -p 8000:8000 mcp-grafana:latest
-```
-
-If you need to run it in STDIO mode instead, override the transport setting:
-
-```
-docker run -it --rm mcp-grafana:latest -t stdio
-```
-
-### Testing
-
-There are three types of tests available:
-
-1. Unit Tests (no external dependencies required):
-
-```bash
-make test-unit
-```
-
-You can also run unit tests with:
-
-```bash
-make test
-```
-
-2. Integration Tests (requires docker containers to be up and running):
-
-```bash
-make test-integration
-```
-
-3. Cloud Tests (requires cloud Grafana instance and credentials):
-
-```bash
-make test-cloud
-```
-
-> Note: Cloud tests are automatically configured in CI. For local development, you'll need to set up your own Grafana Cloud instance and credentials.
-
-More comprehensive integration tests will require a Grafana instance to be running locally on port 3000; you can start one with Docker Compose:
-
-```bash
-docker-compose up -d
-```
-
-The integration tests can be run with:
-
-```bash
-make test-all
-```
-
-If you're adding more tools, please add integration tests for them. The existing tests should be a good starting point.
-
-### Linting
-
-To lint the code, run:
-
-```bash
-make lint
-```
-
-This includes a custom linter that checks for unescaped commas in `jsonschema` struct tags. The commas in `description` fields must be escaped with `\\,` to prevent silent truncation. You can run just this linter with:
-
-```bash
-make lint-jsonschema
-```
-
-See the [JSONSchema Linter documentation](internal/linter/jsonschema/README.md) for more details.
-
-## License
-
-This project is licensed under the [Apache License, Version 2.0](LICENSE).
-
-[mcp]: https://modelcontextprotocol.io/
-[service-account]: https://grafana.com/docs/grafana/latest/administration/service-accounts/#add-a-token-to-a-service-account-in-grafana
+Подробнее: [Build and test](docs/sources/developer/build-and-test.md), [Go SDK](docs/sources/developer/go-sdk.md), [JSONSchema linter](internal/linter/jsonschema/README.md).
