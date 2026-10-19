@@ -8,12 +8,13 @@ keywords:
   - library
   - MCP
 weight: 1
-aliases: []
+aliases:
+  - /docs/grafana-cloud/machine-learning/mcp/developer/go-sdk/
 ---
 
 # Go SDK (programmatic use)
 
-You can use the Grafana MCP server as a Go library to build custom MCP server contexts, for example with custom TLS or debug settings. The package is available on [pkg.go.dev](https://pkg.go.dev/github.com/grafana/mcp-grafana).
+You can use the Grafana MCP server as a Go library to build custom MCP server contexts, for example with custom TLS or debug settings. The package is available on [pkg.go.dev](https://pkg.go.dev/github.com/grafana/mcp-grafana/v2).
 
 ## What you'll achieve
 
@@ -21,7 +22,7 @@ You integrate the server into your own Go program, using `ComposedStdioContextFu
 
 ## Before you begin
 
-- A Go toolchain and the module in your project: `go get github.com/grafana/mcp-grafana`.
+- A Go toolchain and the module in your project: `go get github.com/grafana/mcp-grafana/v2`.
 
 ## Compose a stdio context with config
 
@@ -41,7 +42,7 @@ grafanaConfig := mcpgrafana.GrafanaConfig{
 contextFunc := mcpgrafana.ComposedStdioContextFunc(grafanaConfig)
 ```
 
-Refer to the [package documentation](https://pkg.go.dev/github.com/grafana/mcp-grafana) for the exact types and constructors.
+Refer to the [package documentation](https://pkg.go.dev/github.com/grafana/mcp-grafana/v2) for the exact types and constructors.
 
 ## Local observability
 

@@ -12,7 +12,7 @@ import (
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/stretchr/testify/require"
 
-	mcpgrafana "github.com/grafana/mcp-grafana"
+	mcpgrafana "github.com/grafana/mcp-grafana/v2"
 )
 
 var (
@@ -136,7 +136,7 @@ func TestGetRulesOpts_queryValues(t *testing.T) {
 				"state":            {"firing", "pending"},
 				"rule_limit":       {"10"},
 				"limit_alerts":     {"5"},
-				"matcher":          {`{"Type":0,"Name":"severity","Value":"critical"}`},
+				"matcher":          {`{"name":"severity","value":"critical","isRegex":false,"isEqual":true}`},
 			},
 		},
 		{
@@ -183,6 +183,15 @@ func TestGetRulesOpts_queryValues(t *testing.T) {
 				"limit_alerts": {"200"},
 			},
 		},
+		{
+			name: "include internal labels is mapped",
+			opts: GetRulesOpts{
+				IncludeInternalLabels: true,
+			},
+			expected: url.Values{
+				"includeInternalLabels": {"true"},
+			},
+		},
 	}
 
 	for _, tc := range tests {
@@ -191,6 +200,59 @@ func TestGetRulesOpts_queryValues(t *testing.T) {
 			require.Equal(t, tc.expected, got)
 		})
 	}
+}
+
+func TestGetRulesOpts_queryValues_matcherEncoding(t *testing.T) {
+	// Grafana unmarshals each `matcher` param into an alertmanager
+	// pkg/labels.Matcher, so the JSON must use lowercase name/value plus the
+	// isRegex/isEqual booleans. Verify every Prometheus match type maps onto the
+	// correct booleans.
+	tests := []struct {
+		name     string
+		matcher  *labels.Matcher
+		expected string
+	}{
+		{
+			name:     "equal",
+			matcher:  labels.MustNewMatcher(labels.MatchEqual, "severity", "critical"),
+			expected: `{"name":"severity","value":"critical","isRegex":false,"isEqual":true}`,
+		},
+		{
+			name:     "not equal",
+			matcher:  labels.MustNewMatcher(labels.MatchNotEqual, "severity", "critical"),
+			expected: `{"name":"severity","value":"critical","isRegex":false,"isEqual":false}`,
+		},
+		{
+			name:     "regex",
+			matcher:  labels.MustNewMatcher(labels.MatchRegexp, "pod", "api-.*"),
+			expected: `{"name":"pod","value":"api-.*","isRegex":true,"isEqual":true}`,
+		},
+		{
+			name:     "not regex",
+			matcher:  labels.MustNewMatcher(labels.MatchNotRegexp, "pod", "api-.*"),
+			expected: `{"name":"pod","value":"api-.*","isRegex":true,"isEqual":false}`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := GetRulesOpts{Matchers: []*labels.Matcher{tc.matcher}}
+			require.Equal(t, tc.expected, opts.queryValues().Get("matcher"))
+		})
+	}
+}
+
+func TestGetRulesOpts_queryValues_multipleMatchers(t *testing.T) {
+	opts := GetRulesOpts{
+		Matchers: []*labels.Matcher{
+			labels.MustNewMatcher(labels.MatchEqual, "team", "backend"),
+			labels.MustNewMatcher(labels.MatchRegexp, "env", "prod.*"),
+		},
+	}
+	require.Equal(t, []string{
+		`{"name":"team","value":"backend","isRegex":false,"isEqual":true}`,
+		`{"name":"env","value":"prod.*","isRegex":true,"isEqual":true}`,
+	}, opts.queryValues()["matcher"])
 }
 
 func TestAlertingClient_GetRules_WithOpts(t *testing.T) {
@@ -245,7 +307,7 @@ func TestAlertingClient_GetRules_WithOpts(t *testing.T) {
 				t.Helper()
 				q := r.URL.Query()
 				require.Equal(t, "cpu-alert", q.Get("search.rule_name"))
-				require.Equal(t, `{"Type":0,"Name":"severity","Value":"critical"}`, q.Get("matcher"))
+				require.Equal(t, `{"name":"severity","value":"critical","isRegex":false,"isEqual":true}`, q.Get("matcher"))
 				require.Equal(t, "5", q.Get("limit_alerts"))
 			},
 		},
@@ -273,7 +335,7 @@ func TestAlertingClient_GetRules_WithOpts(t *testing.T) {
 				require.Equal(t, []string{"firing", "pending"}, q["state"])
 				require.Equal(t, "20", q.Get("rule_limit"))
 				require.Equal(t, "3", q.Get("limit_alerts"))
-				require.Equal(t, `{"Type":0,"Name":"team","Value":"alerting"}`, q.Get("matcher"))
+				require.Equal(t, `{"name":"team","value":"alerting","isRegex":false,"isEqual":true}`, q.Get("matcher"))
 			},
 		},
 	}
@@ -300,69 +362,31 @@ func TestAlertingClient_GetRules_WithOpts(t *testing.T) {
 }
 
 func TestAlertingClient_GetDatasourceRules(t *testing.T) {
-	mockDatasourceResponse := struct {
-		Status string `json:"status"`
-		Data   struct {
-			Groups []struct{} `json:"groups"`
-		} `json:"data"`
-	}{
-		Status: "success",
-	}
-
 	tests := []struct {
-		name          string
-		dsUID         string
-		opts          *GetRulesOpts
-		assertRequest func(t *testing.T, r *http.Request)
+		name      string
+		opts      *GetRulesOpts
+		nextToken string
+		want      url.Values
 	}{
-		{
-			name:  "nil opts produces no query params",
-			dsUID: "my-datasource",
-			opts:  nil,
-			assertRequest: func(t *testing.T, r *http.Request) {
-				t.Helper()
-				require.Equal(t, "/api/prometheus/my-datasource/api/v1/rules", r.URL.Path)
-				require.Empty(t, r.URL.RawQuery)
-			},
-		},
-		{
-			name:  "opts are forwarded as query params",
-			dsUID: "prom-ds",
-			opts: &GetRulesOpts{
-				FolderUID: "test-folder",
-				RuleGroup: "test-group",
-				RuleType:  "alerting",
-				RuleName:  "cpu",
-				States:    []string{"firing"},
-				RuleLimit: 10,
-			},
-			assertRequest: func(t *testing.T, r *http.Request) {
-				t.Helper()
-				require.Equal(t, "/api/prometheus/prom-ds/api/v1/rules", r.URL.Path)
-				q := r.URL.Query()
-				require.Equal(t, "test-folder", q.Get("folder_uid"))
-				require.Equal(t, "test-group", q.Get("rule_group"))
-				require.Equal(t, "alerting", q.Get("rule_type"))
-				require.Equal(t, "cpu", q.Get("search.rule_name"))
-				require.Equal(t, []string{"firing"}, q["state"])
-				require.Equal(t, "10", q.Get("rule_limit"))
-			},
-		},
+		{name: "defaults", want: url.Values{"group_limit": {"20"}, "exclude_alerts": {"true"}}},
+		{name: "alerting filter and group", opts: &GetRulesOpts{
+			FolderUID: "folder", RuleGroup: "group", RuleType: "alerting", RuleName: "cpu", States: []string{"firing"}, RuleLimit: 10,
+		}, want: url.Values{"group_limit": {"20"}, "exclude_alerts": {"true"}, "type": {"alert"}, "rule_group[]": {"group"}, "rule_group": {"group"}}},
+		{name: "recording filter and continuation", opts: &GetRulesOpts{RuleType: "recording"}, nextToken: "opaque+/=token",
+			want: url.Values{"group_limit": {"20"}, "exclude_alerts": {"true"}, "type": {"record"}, "group_next_token": {"opaque+/=token"}}},
 	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
 			server, client := setupMockServer(func(w http.ResponseWriter, r *http.Request) {
-				tc.assertRequest(t, r)
+				require.Equal(t, "/api/prometheus/prom-ds/api/v1/rules", r.URL.Path)
+				require.Equal(t, tt.want, r.URL.Query())
 				w.Header().Set("Content-Type", "application/json")
-				err := json.NewEncoder(w).Encode(mockDatasourceResponse)
-				require.NoError(t, err)
+				_, _ = w.Write([]byte(`{"status":"success","data":{"groups":[],"groupNextToken":"next-page"}}`))
 			})
 			defer server.Close()
-
-			result, err := client.GetDatasourceRules(context.Background(), tc.dsUID, tc.opts)
+			result, err := client.GetDatasourceRules(t.Context(), "prom-ds", tt.opts, tt.nextToken)
 			require.NoError(t, err)
-			require.NotNil(t, result)
+			require.Equal(t, "next-page", result.NextToken)
 		})
 	}
 }

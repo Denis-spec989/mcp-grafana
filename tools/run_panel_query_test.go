@@ -6,9 +6,41 @@ import (
 	"testing"
 	"time"
 
+	"github.com/grafana/mcp-grafana/v2/tools/sql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// These test shims preserve the historic single-value helper signatures used
+// by the existing substitution and extraction tests. Production code uses the
+// multi-value helpers directly so formatted variables can retain all values.
+func testTemplateVariableValues(variables map[string]string) templateVariableValues {
+	if variables == nil {
+		return nil
+	}
+
+	result := make(templateVariableValues, len(variables))
+	for name, value := range variables {
+		result[name] = []string{value}
+	}
+	return result
+}
+
+func substituteTemplateVariables(query string, variables map[string]string) string {
+	return substituteTemplateVariableValues(query, testTemplateVariableValues(variables))
+}
+
+func substituteTemplateVariablesInMap(target map[string]interface{}, variables map[string]string) map[string]interface{} {
+	return substituteTemplateVariablesInMapWithValues(target, testTemplateVariableValues(variables))
+}
+
+func substituteTemplateVariablesInSlice(slice []interface{}, variables map[string]string) []interface{} {
+	return substituteTemplateVariablesInSliceWithValues(slice, testTemplateVariableValues(variables))
+}
+
+func extractTemplateVariables(db map[string]interface{}) map[string]string {
+	return firstTemplateVariableValues(extractTemplateVariableValues(db))
+}
 
 func TestFindPanelByIDForRunPanelQuery(t *testing.T) {
 	tests := []struct {
@@ -439,6 +471,75 @@ func TestExtractTemplateVariables(t *testing.T) {
 			},
 			want: map[string]string{},
 		},
+		{
+			name: "constant variable without current falls back to query",
+			dashboard: map[string]interface{}{
+				"templating": map[string]interface{}{
+					"list": []interface{}{
+						map[string]interface{}{
+							"name":  "conversionRate",
+							"type":  "constant",
+							"query": "158.87",
+						},
+					},
+				},
+			},
+			want: map[string]string{
+				"conversionRate": "158.87",
+			},
+		},
+		{
+			name: "textbox variable without current falls back to query",
+			dashboard: map[string]interface{}{
+				"templating": map[string]interface{}{
+					"list": []interface{}{
+						map[string]interface{}{
+							"name":  "daysBack",
+							"type":  "textbox",
+							"query": "30",
+						},
+					},
+				},
+			},
+			want: map[string]string{
+				"daysBack": "30",
+			},
+		},
+		{
+			name: "current takes precedence over query for constant",
+			dashboard: map[string]interface{}{
+				"templating": map[string]interface{}{
+					"list": []interface{}{
+						map[string]interface{}{
+							"name":  "margin",
+							"type":  "constant",
+							"query": "1",
+							"current": map[string]interface{}{
+								"value": "1.5",
+							},
+						},
+					},
+				},
+			},
+			want: map[string]string{
+				"margin": "1.5",
+			},
+		},
+		{
+			name: "query variable does not fall back to its datasource query",
+			dashboard: map[string]interface{}{
+				"templating": map[string]interface{}{
+					"list": []interface{}{
+						map[string]interface{}{
+							"name":  "job",
+							"type":  "query",
+							"query": "label_values(up, job)",
+						},
+					},
+				},
+			},
+			want: map[string]string{},
+		},
 	}
 
 	for _, tt := range tests {
@@ -513,6 +614,87 @@ func TestSubstituteTemplateVariables(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got := substituteTemplateVariables(tt.query, tt.variables)
 			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestSubstituteTemplateVariablesSQLString(t *testing.T) {
+	query := "SELECT * FROM orders WHERE order_intent_id = ${order_intent_id:sqlstring}"
+	variables := map[string]string{"order_intent_id": "oi-123"}
+
+	assert.Equal(t,
+		"SELECT * FROM orders WHERE order_intent_id = 'oi-123'",
+		substituteTemplateVariables(query, variables),
+	)
+}
+
+func TestSubstituteTemplateVariableValuesSQLString(t *testing.T) {
+	expression := "$" + "{order_intent_id:sqlstring}"
+	tests := []struct {
+		name      string
+		query     string
+		variables templateVariableValues
+		want      string
+	}{
+		{
+			name:      "single value",
+			query:     "WHERE order_intent_id = " + expression,
+			variables: templateVariableValues{"order_intent_id": {"oi-123"}},
+			want:      "WHERE order_intent_id = 'oi-123'",
+		},
+		{
+			name:      "multiple values",
+			query:     "WHERE order_intent_id IN (" + expression + ")",
+			variables: templateVariableValues{"order_intent_id": {"oi-123", "oi-456"}},
+			want:      "WHERE order_intent_id IN ('oi-123','oi-456')",
+		},
+		{
+			name:      "single quote is doubled",
+			query:     "WHERE order_intent_id = " + expression,
+			variables: templateVariableValues{"order_intent_id": {"oi'123"}},
+			want:      "WHERE order_intent_id = 'oi''123'",
+		},
+		{
+			name:      "double quote is escaped",
+			query:     "WHERE order_intent_id = " + expression,
+			variables: templateVariableValues{"order_intent_id": {"oi\"123"}},
+			want:      "WHERE order_intent_id = 'oi\\\"123'",
+		},
+		{
+			name:      "empty string is quoted",
+			query:     "WHERE order_intent_id = " + expression,
+			variables: templateVariableValues{"order_intent_id": {""}},
+			want:      "WHERE order_intent_id = ''",
+		},
+		{
+			name:      "empty multi-select is empty",
+			query:     "WHERE order_intent_id IN (" + expression + ")",
+			variables: templateVariableValues{"order_intent_id": {}},
+			want:      "WHERE order_intent_id IN ()",
+		},
+		{
+			name:      "unknown format falls back to glob",
+			query:     "WHERE order_intent_id IN ($" + "{order_intent_id:unsupported})",
+			variables: templateVariableValues{"order_intent_id": {"oi-123", "oi-456"}},
+			want:      "WHERE order_intent_id IN ({oi-123,oi-456})",
+		},
+		{
+			name:      "unformatted multi-select keeps historical first value",
+			query:     "WHERE order_intent_id = $order_intent_id",
+			variables: templateVariableValues{"order_intent_id": {"oi-123", "oi-456"}},
+			want:      "WHERE order_intent_id = oi-123",
+		},
+		{
+			name:      "missing variable remains unchanged",
+			query:     "WHERE order_intent_id = " + expression,
+			variables: templateVariableValues{},
+			want:      "WHERE order_intent_id = " + expression,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, substituteTemplateVariableValues(tt.query, tt.variables))
 		})
 	}
 }
@@ -797,18 +979,18 @@ func TestIsEmptyPanelResult(t *testing.T) {
 			expected: false,
 		},
 		{
-			name:     "nil ClickHouseQueryResult",
-			results:  (*ClickHouseQueryResult)(nil),
+			name:     "nil sql.SQLQueryResult",
+			results:  (*sql.SQLQueryResult)(nil),
 			expected: true,
 		},
 		{
-			name:     "empty ClickHouseQueryResult",
-			results:  &ClickHouseQueryResult{Rows: []map[string]interface{}{}},
+			name:     "empty sql.SQLQueryResult",
+			results:  &sql.SQLQueryResult{Rows: []map[string]interface{}{}},
 			expected: true,
 		},
 		{
-			name: "non-empty ClickHouseQueryResult",
-			results: &ClickHouseQueryResult{
+			name: "non-empty sql.SQLQueryResult",
+			results: &sql.SQLQueryResult{
 				Rows: []map[string]interface{}{{"value": 1}},
 			},
 			expected: false,
@@ -831,18 +1013,18 @@ func TestIsEmptyPanelResult(t *testing.T) {
 			expected: false,
 		},
 		{
-			name:     "nil BigQueryQueryResult",
-			results:  (*BigQueryQueryResult)(nil),
+			name:     "nil sql.SQLQueryResult",
+			results:  (*sql.SQLQueryResult)(nil),
 			expected: true,
 		},
 		{
-			name:     "empty BigQueryQueryResult",
-			results:  &BigQueryQueryResult{Rows: []map[string]interface{}{}},
+			name:     "empty sql.SQLQueryResult",
+			results:  &sql.SQLQueryResult{Rows: []map[string]interface{}{}},
 			expected: true,
 		},
 		{
-			name: "non-empty BigQueryQueryResult",
-			results: &BigQueryQueryResult{
+			name: "non-empty sql.SQLQueryResult",
+			results: &sql.SQLQueryResult{
 				Rows: []map[string]interface{}{{"count": 42}},
 			},
 			expected: false,
@@ -893,7 +1075,7 @@ func TestGeneratePanelQueryHints(t *testing.T) {
 			containsHints: []string{
 				"No data found",
 				"Time range",
-				"describe_clickhouse_table",
+				"describe_sql_table",
 				"COUNT(*)",
 			},
 		},
@@ -925,6 +1107,38 @@ func TestGeneratePanelQueryHints(t *testing.T) {
 				"Time range",
 				"COUNT(*)",
 				"processing location",
+			},
+		},
+		{
+			name:           "mssql hints",
+			datasourceType: "mssql",
+			query:          "SELECT COUNT(*) FROM revenue WHERE $__timeFilter(ts)",
+			containsHints: []string{
+				"No data found",
+				"Time range",
+				"COUNT(*)",
+				"SELECT permission",
+			},
+		},
+		{
+			name:           "postgres hints (modern identifier)",
+			datasourceType: "grafana-postgresql-datasource",
+			query:          "SELECT COUNT(*) FROM revenue WHERE $__timeFilter(ts)",
+			containsHints: []string{
+				"No data found",
+				"Time range",
+				"COUNT(*)",
+				"PostgreSQL",
+				"search_path",
+			},
+		},
+		{
+			name:           "postgres hints (legacy identifier)",
+			datasourceType: "postgres",
+			query:          "SELECT COUNT(*) FROM revenue WHERE $__timeFilter(ts)",
+			containsHints: []string{
+				"No data found",
+				"PostgreSQL",
 			},
 		},
 	}
@@ -1002,8 +1216,14 @@ func TestNormalizeDatasourceType(t *testing.T) {
 		{"influxdb", "influxdb"},
 		{"InfluxDB", "influxdb"},
 		{"grafana-bigquery-datasource", "bigquery"},
+		{"mssql", "mssql"},
+		{"MSSQL", "mssql"},
 		{"bigquery", "bigquery"},
 		{"BigQuery", "bigquery"},
+		{"postgres", "postgres"},
+		{"Postgres", "postgres"},
+		{"grafana-postgresql-datasource", "postgres"},
+		{"Grafana-PostgreSQL-Datasource", "postgres"},
 		{"some-other-type", "some-other-type"},
 		{"", ""},
 	}
@@ -1148,11 +1368,100 @@ func TestExtractPanelInfo_BigQuery(t *testing.T) {
 	assert.Equal(t, "US", info.RawTarget["location"])
 }
 
-func TestExecuteBigQueryPanelQuery_NilTarget(t *testing.T) {
+func TestExecuteSQLPanelQuery_NilTarget(t *testing.T) {
 	// A missing raw target should produce a clear error rather than panicking.
-	_, err := executeBigQueryPanelQuery(t.Context(), "bigquery-uid", &panelInfo{}, "SELECT 1", "now-1h", "now", nil)
+	_, err := executeSQLPanelQuery(t.Context(), "bigquery-uid", &panelInfo{}, "SELECT 1", "now-1h", "now", nil, sql.BigQueryDatasourceType)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "BigQuery panel target not available")
+	assert.Contains(t, err.Error(), "SQL panel target not available")
+
+	_, err = executeSQLPanelQuery(t.Context(), "mssql-uid", &panelInfo{}, "SELECT 1", "now-1h", "now", nil, sql.MSSQLDatasourceType)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "SQL panel target not available")
+
+	_, err = executeSQLPanelQuery(t.Context(), "postgres-uid", &panelInfo{}, "SELECT 1", "now-1h", "now", nil, sql.PostgresDatasourceType)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "SQL panel target not available")
+}
+
+func TestDefaultSQLFormat(t *testing.T) {
+	// BigQuery's sqlds query model takes a numeric format enum, MSSQL's sqleng model
+	// unmarshals format into a string and errors on a number.
+	assert.Equal(t, SQLFormatTable, defaultSQLFormat(sql.BigQueryDatasourceType))
+	assert.Equal(t, MSSQLFormatTable, defaultSQLFormat(sql.MSSQLDatasourceType))
+	// PostgreSQL is also sqleng-based, so it uses the string table format under
+	// both its modern and legacy datasource identifiers.
+	assert.Equal(t, MSSQLFormatTable, defaultSQLFormat(sql.PostgresDatasourceType))
+	assert.Equal(t, MSSQLFormatTable, defaultSQLFormat(sql.PostgresLegacyDatasourceType))
+}
+
+func TestExtractPanelInfoMSSQL(t *testing.T) {
+	// MSSQL panels carry their statement in rawSql, like the other SQL datasources,
+	// and the raw target must survive so format is not overridden.
+	panel := map[string]interface{}{
+		"id":    81,
+		"title": "Revenue",
+		"datasource": map[string]interface{}{
+			"uid":  "mssql-uid",
+			"type": "mssql",
+		},
+		"targets": []interface{}{
+			map[string]interface{}{
+				"refId":  "A",
+				"rawSql": "DECLARE @From datetime = $__timeFrom(); SELECT SUM(amount) FROM revenue WHERE ts >= @From",
+				"format": "table",
+			},
+		},
+	}
+
+	info, err := extractPanelInfo(panel, 0)
+	require.NoError(t, err)
+	assert.Equal(t, "mssql-uid", info.DatasourceUID)
+	assert.Equal(t, "mssql", info.DatasourceType)
+	assert.Contains(t, info.Query, "$__timeFrom()")
+	assert.Equal(t, "table", info.RawTarget["format"])
+}
+
+func TestExtractPanelInfoPostgres(t *testing.T) {
+	// PostgreSQL panels carry their statement in rawSql like the other SQL
+	// datasources, and the raw target must survive so datasource-specific fields
+	// (e.g. format) and the format override are preserved.
+	tests := []struct {
+		name       string
+		dsType     string
+		wantDSType string
+	}{
+		{name: "modern identifier", dsType: "grafana-postgresql-datasource", wantDSType: "grafana-postgresql-datasource"},
+		{name: "legacy identifier", dsType: "postgres", wantDSType: "postgres"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			panel := map[string]interface{}{
+				"id":    91,
+				"title": "Reconciliation",
+				"datasource": map[string]interface{}{
+					"uid":  "postgres-uid",
+					"type": tt.dsType,
+				},
+				"targets": []interface{}{
+					map[string]interface{}{
+						"refId":  "A",
+						"rawSql": "SELECT $__timeGroup(ts, '1h') AS t, count(*) FROM checks WHERE $__timeFilter(ts) GROUP BY 1",
+						"format": "table",
+					},
+				},
+			}
+
+			info, err := extractPanelInfo(panel, 0)
+			require.NoError(t, err)
+			assert.Equal(t, "postgres-uid", info.DatasourceUID)
+			assert.Equal(t, tt.wantDSType, info.DatasourceType)
+			assert.Contains(t, info.Query, "$__timeGroup(ts, '1h')")
+			assert.Contains(t, info.Query, "$__timeFilter(ts)")
+			// The raw target survives so the panel's saved format is preserved.
+			assert.Equal(t, "table", info.RawTarget["format"])
+		})
+	}
 }
 
 func TestSubstituteTemplateVariablesInMap(t *testing.T) {

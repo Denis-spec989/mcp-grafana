@@ -8,7 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	mcpgrafana "github.com/grafana/mcp-grafana"
+	mcpgrafana "github.com/grafana/mcp-grafana/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -217,6 +217,11 @@ func TestExtractUserIDs(t *testing.T) {
 			name:  "empty any slice",
 			input: []any{},
 			want:  []string{},
+		},
+		{
+			name:  "any slice of user objects",
+			input: []any{map[string]any{"username": "jdoe", "pk": "U1A2B3C4D5E6F"}},
+			want:  []string{"U1A2B3C4D5E6F"},
 		},
 	}
 

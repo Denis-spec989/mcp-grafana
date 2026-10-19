@@ -2,15 +2,18 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/grafana/grafana-openapi-client-go/models"
-	mcpgrafana "github.com/grafana/mcp-grafana"
+	mcpgrafana "github.com/grafana/mcp-grafana/v2"
 	"github.com/prometheus/client_golang/api"
 	promv1 "github.com/prometheus/client_golang/api/prometheus/v1"
 	"github.com/prometheus/common/model"
@@ -29,6 +32,9 @@ type promBackend interface {
 
 	// LabelValues returns values for a label, optionally filtered by matchers and time range.
 	LabelValues(ctx context.Context, labelName string, matchers []string, start, end time.Time) ([]string, error)
+
+	// MetricNames returns metric names which match the regex, with an optional limit on results.
+	MetricNames(ctx context.Context, re *regexp.Regexp, limit int, start, end time.Time) ([]string, error)
 
 	// MetricMetadata returns metadata about metrics (description, type, unit).
 	MetricMetadata(ctx context.Context, metric string, limit int) (map[string][]promv1.Metadata, error)
@@ -53,6 +59,8 @@ func backendForDatasource(ctx context.Context, uid string, projectOverride ...st
 		return newCloudMonitoringBackend(ctx, ds, proj)
 	case victoriaMetricsDatasourceType:
 		return newVictoriaMetricsBackend(ctx, uid, ds)
+	case "tempo":
+		return nil, fmt.Errorf("datasource %s is of type %q, which is not a supported Prometheus-compatible datasource", uid, ds.Type)
 	default:
 		// For prometheus, thanos, cortex, mimir, and any other Prometheus-compatible datasource,
 		// use the native Prometheus client via the datasource proxy.
@@ -70,7 +78,21 @@ func newPrometheusBackend(ctx context.Context, uid string, ds *models.DataSource
 	cfg := mcpgrafana.GrafanaConfigFromContext(ctx)
 	grafanaURL := trimTrailingSlash(cfg.URL)
 	resourcesBase, proxyBase := datasourceProxyPaths(uid)
-	url := grafanaURL + resourcesBase
+	primaryBase, fallbackBase := resourcesBase, proxyBase
+	legacyMode := false
+	if numericBase, uidBase, ok := fallbackProxyBases(ctx, uid); ok {
+		// The datasource was resolved through the frontend-settings fallback,
+		// meaning this deployment's metadata API is inaccessible — in practice
+		// Grafana before 9.0, which has no uid-based routes at all (8.x answers
+		// them with a 400 "id is invalid", 7.x with a 500). Route through the
+		// numeric-id proxy path directly, keeping the uid-based proxy route
+		// only as the transport-level fallback for the opposite case: a newer
+		// Grafana with an RBAC-restricted token, where the numeric routes may
+		// be disabled (404, off by default since Grafana 13).
+		primaryBase, fallbackBase = numericBase, uidBase
+		legacyMode = true
+	}
+	url := grafanaURL + primaryBase
 
 	rt, err := mcpgrafana.BuildTransport(&cfg, api.DefaultRoundTripper)
 	if err != nil {
@@ -88,13 +110,19 @@ func newPrometheusBackend(ctx context.Context, uid string, ds *models.DataSource
 		}
 	}
 
-	// Wrap with fallback transport: try /resources first, fall back to /proxy
-	// on 403/500 for compatibility with different managed Grafana deployments.
-	rt = newDatasourceFallbackTransport(rt, resourcesBase, proxyBase)
+	// Wrap with fallback transport: try the primary base first, fall back to
+	// the alternate for compatibility with different Grafana deployments (see
+	// fallback_transport.go for the per-mode retry rules).
+	if legacyMode {
+		rt = newLegacyDatasourceFallbackTransport(rt, primaryBase, fallbackBase)
+	} else {
+		rt = newDatasourceFallbackTransport(rt, primaryBase, fallbackBase)
+	}
 
+	rt = &prometheusResponseLimitTransport{underlying: rt}
 	c, err := api.NewClient(api.Config{
 		Address:      url,
-		RoundTripper: rt,
+		RoundTripper: &prometheusMetricNamesTransport{underlying: rt},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("creating Prometheus client: %w", err)
@@ -107,19 +135,19 @@ func (b *prometheusBackend) Query(ctx context.Context, expr string, queryType st
 	switch queryType {
 	case "range":
 		step := time.Duration(stepSeconds) * time.Second
-		result, warnings, err := b.api.QueryRange(ctx, expr, promv1.Range{
+		result, warnings, _, err := b.api.QueryRange(ctx, expr, promv1.Range{
 			Start: start,
 			End:   end,
 			Step:  step,
 		})
 		if err != nil {
-			return nil, nil, fmt.Errorf("querying Prometheus range: %w", err)
+			return nil, nil, fmt.Errorf("querying Prometheus range: %w", promErrorWithDetail(err))
 		}
 		return result, warnings, nil
 	case "instant":
-		result, warnings, err := b.api.Query(ctx, expr, end)
+		result, warnings, _, err := b.api.Query(ctx, expr, end)
 		if err != nil {
-			return nil, nil, fmt.Errorf("querying Prometheus instant: %w", err)
+			return nil, nil, fmt.Errorf("querying Prometheus instant: %w", promErrorWithDetail(err))
 		}
 		return result, warnings, nil
 	default:
@@ -128,17 +156,21 @@ func (b *prometheusBackend) Query(ctx context.Context, expr string, queryType st
 }
 
 func (b *prometheusBackend) LabelNames(ctx context.Context, matchers []string, start, end time.Time) ([]string, error) {
-	names, _, err := b.api.LabelNames(ctx, matchers, start, end)
+	names, _, _, err := b.api.LabelNames(ctx, matchers, start, end)
 	if err != nil {
-		return nil, fmt.Errorf("listing Prometheus label names: %w", err)
+		return nil, fmt.Errorf("listing Prometheus label names: %w", promErrorWithDetail(err))
 	}
-	return names, nil
+	result := make([]string, len(names))
+	for i, n := range names {
+		result[i] = string(n)
+	}
+	return result, nil
 }
 
 func (b *prometheusBackend) LabelValues(ctx context.Context, labelName string, matchers []string, start, end time.Time) ([]string, error) {
-	values, _, err := b.api.LabelValues(ctx, labelName, matchers, start, end)
+	values, _, _, err := b.api.LabelValues(ctx, labelName, matchers, start, end)
 	if err != nil {
-		return nil, fmt.Errorf("listing Prometheus label values: %w", err)
+		return nil, fmt.Errorf("listing Prometheus label values: %w", promErrorWithDetail(err))
 	}
 	result := make([]string, len(values))
 	for i, v := range values {
@@ -147,12 +179,58 @@ func (b *prometheusBackend) LabelValues(ctx context.Context, labelName string, m
 	return result, nil
 }
 
+func (b *prometheusBackend) MetricNames(ctx context.Context, re *regexp.Regexp, limit int, start, end time.Time) ([]string, error) {
+	var matchers []string
+	if re != nil {
+		// make the regex matching behavior behave like the previous client-side Go matching behaviour
+		pattern := "(?s:.*)(?-s:" + re.String() + ")(?s:.*)"
+		// The non-empty matcher keeps regexes like ".*" valid as a series selector.
+		matchers = []string{fmt.Sprintf(`{__name__!="",__name__=~%q}`, pattern)}
+	}
+	values, _, _, err := b.api.LabelValues(ctx, "__name__", matchers, start, end, promv1.WithLimit(uint64(limit)))
+	if err != nil {
+		return nil, fmt.Errorf("listing Prometheus metric names: %w", promErrorWithDetail(err))
+	}
+	recordMetricNames(ctx, "prometheus", len(values))
+	result := make([]string, len(values))
+	for i, value := range values {
+		result[i] = string(value)
+	}
+	return result, nil
+}
+
 func (b *prometheusBackend) MetricMetadata(ctx context.Context, metric string, limit int) (map[string][]promv1.Metadata, error) {
 	metadata, err := b.api.Metadata(ctx, metric, fmt.Sprintf("%d", limit))
 	if err != nil {
-		return nil, fmt.Errorf("listing Prometheus metric metadata: %w", err)
+		return nil, fmt.Errorf("listing Prometheus metric metadata: %w", promErrorWithDetail(err))
 	}
 	return metadata, nil
+}
+
+// promErrorWithDetail adds the response body to errors from the Prometheus
+// client. For status codes other than 400 and 422 the client stores the body in
+// Error.Detail, which Error() leaves out, so a Thanos query timeout (503) would
+// otherwise surface as just "server error: 503".
+func promErrorWithDetail(err error) error {
+	var apiErr *promv1.Error
+	if !errors.As(err, &apiErr) || apiErr.Detail == "" {
+		return err
+	}
+	var body struct {
+		ErrorType string `json:"errorType"`
+		Error     string `json:"error"`
+	}
+	if json.Unmarshal([]byte(apiErr.Detail), &body) == nil && body.Error != "" {
+		if body.ErrorType != "" {
+			return fmt.Errorf("%w: %s: %s", err, body.ErrorType, body.Error)
+		}
+		return fmt.Errorf("%w: %s", err, body.Error)
+	}
+	detail := strings.TrimSpace(apiErr.Detail)
+	if len(detail) > 1024 {
+		detail = detail[:1024] + "..."
+	}
+	return fmt.Errorf("%w: %s", err, detail)
 }
 
 // postToGetRoundTripper converts POST requests to GET requests by moving the

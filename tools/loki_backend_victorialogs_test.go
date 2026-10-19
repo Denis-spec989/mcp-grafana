@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	mcpgrafana "github.com/grafana/mcp-grafana"
+	mcpgrafana "github.com/grafana/mcp-grafana/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -62,12 +62,24 @@ func TestVictoriaLogsBackend_ListLabelNames(t *testing.T) {
 	})
 	b := newTestVLBackend(t, fake.server)
 
-	names, err := b.ListLabelNames(context.Background(), time.Time{}, time.Time{})
+	names, err := b.ListLabelNames(context.Background(), "", time.Time{}, time.Time{})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"app", "pod"}, names)
 	assert.Equal(t, "/select/logsql/field_names", fake.lastPath)
 	assert.Equal(t, http.MethodGet, fake.lastMethod)
 	assert.Equal(t, victoriaLogsAllQuery, fake.lastQuery.Get("query"))
+}
+
+func TestVictoriaLogsBackend_ListLabelNames_PassesMatcher(t *testing.T) {
+	fake := newFakeVLServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"values":[{"value":"service","hits":3}]}`)
+	})
+	b := newTestVLBackend(t, fake.server)
+
+	names, err := b.ListLabelNames(context.Background(), `{namespace="prod"}`, time.Time{}, time.Time{})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"service"}, names)
+	assert.Equal(t, `{namespace="prod"}`, fake.lastQuery.Get("query"))
 }
 
 func TestVictoriaLogsBackend_ListLabelValues_PassesField(t *testing.T) {
@@ -78,12 +90,26 @@ func TestVictoriaLogsBackend_ListLabelValues_PassesField(t *testing.T) {
 
 	start := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
 	end := start.Add(time.Hour)
-	values, err := b.ListLabelValues(context.Background(), "app", start, end)
+	values, err := b.ListLabelValues(context.Background(), "app", "", start, end)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"acme-app"}, values)
 	assert.Equal(t, "app", fake.lastQuery.Get("field"))
+	assert.Equal(t, victoriaLogsAllQuery, fake.lastQuery.Get("query"))
 	assert.Equal(t, start.Format(time.RFC3339), fake.lastQuery.Get("start"))
 	assert.Equal(t, end.Format(time.RFC3339), fake.lastQuery.Get("end"))
+}
+
+func TestVictoriaLogsBackend_ListLabelValues_PassesMatcher(t *testing.T) {
+	fake := newFakeVLServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"values":[{"value":"acme-app","hits":5}]}`)
+	})
+	b := newTestVLBackend(t, fake.server)
+
+	values, err := b.ListLabelValues(context.Background(), "app", `{namespace="prod"}`, time.Time{}, time.Time{})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"acme-app"}, values)
+	assert.Equal(t, "app", fake.lastQuery.Get("field"))
+	assert.Equal(t, `{namespace="prod"}`, fake.lastQuery.Get("query"))
 }
 
 func TestVictoriaLogsBackend_QueryLogs_ParsesNDJSON(t *testing.T) {
@@ -147,6 +173,24 @@ func TestVictoriaLogsBackend_QueryLogs_ForwardReversesOrder(t *testing.T) {
 	assert.Equal(t, "newest", res.Entries[2].Line)
 }
 
+func TestVictoriaLogsBackend_QueryLogs_PreservesNanosecondBounds(t *testing.T) {
+	fake := newFakeVLServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "")
+	})
+	b := newTestVLBackend(t, fake.server)
+
+	start := time.Date(2026, 5, 10, 12, 0, 0, 1, time.UTC)
+	end := time.Date(2026, 5, 10, 12, 0, 1, 999999999, time.UTC)
+	_, err := b.QueryLogs(context.Background(), lokiQueryParams{
+		Query: "*",
+		Start: start,
+		End:   end,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "2026-05-10T12:00:00.000000001Z", fake.lastForm.Get("start"))
+	assert.Equal(t, "2026-05-10T12:00:01.999999999Z", fake.lastForm.Get("end"))
+}
+
 func TestVictoriaLogsBackend_QueryLogs_InstantCollapsesWindow(t *testing.T) {
 	fake := newFakeVLServer(t, func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, "")
@@ -177,7 +221,7 @@ func TestVictoriaLogsBackend_QueryStats_AppendsCountPipe(t *testing.T) {
 	// Other fields should remain zero — VL does not expose them.
 	assert.Equal(t, 0, stats.Streams)
 	assert.Equal(t, 0, stats.Chunks)
-	assert.Equal(t, 0, stats.Bytes)
+	assert.Equal(t, int64(0), stats.Bytes)
 
 	// Confirm we appended a stats pipe.
 	q := fake.lastForm.Get("query")

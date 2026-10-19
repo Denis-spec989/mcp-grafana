@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/grafana/grafana-openapi-client-go/models"
-	mcpgrafana "github.com/grafana/mcp-grafana"
+	mcpgrafana "github.com/grafana/mcp-grafana/v2"
 )
 
 // victoriaLogsDatasourceType identifies the VictoriaLogs Grafana plugin.
@@ -39,17 +39,31 @@ type victoriaLogsBackend struct {
 func newVictoriaLogsBackend(ctx context.Context, uid string, _ *models.DataSource) (*victoriaLogsBackend, error) {
 	cfg := mcpgrafana.GrafanaConfigFromContext(ctx)
 	resourcesBase, proxyBase := datasourceProxyPaths(uid)
-	baseURL := trimTrailingSlash(cfg.URL) + proxyBase
+	primaryBase, fallbackBase := proxyBase, resourcesBase
+	legacyMode := false
+	if numericBase, uidBase, ok := fallbackProxyBases(ctx, uid); ok {
+		// Legacy-compatible routing — see newPrometheusBackend for the full
+		// rationale: route through the numeric-id proxy path directly, keeping
+		// the uid-based proxy route as the transport-level fallback.
+		primaryBase, fallbackBase = numericBase, uidBase
+		legacyMode = true
+	}
+	baseURL := trimTrailingSlash(cfg.URL) + primaryBase
 
 	transport, err := mcpgrafana.BuildTransport(&cfg, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create custom transport: %w", err)
 	}
 
-	// Mirror the native Loki client: try /proxy first and fall back to
-	// /resources on 403/500 for compatibility with managed Grafana
-	// deployments. See fallback_transport.go for the rationale.
-	rt := newDatasourceFallbackTransport(transport, proxyBase, resourcesBase)
+	// Mirror the native Loki client: try the primary base first and fall back
+	// to the alternate for compatibility with different Grafana deployments.
+	// See fallback_transport.go for the per-mode retry rules.
+	var rt http.RoundTripper
+	if legacyMode {
+		rt = newLegacyDatasourceFallbackTransport(transport, primaryBase, fallbackBase)
+	} else {
+		rt = newDatasourceFallbackTransport(transport, primaryBase, fallbackBase)
+	}
 
 	return &victoriaLogsBackend{
 		httpClient: &http.Client{Transport: rt, Timeout: 30 * time.Second},
@@ -80,14 +94,13 @@ type vlStatsResponse struct {
 
 // addVLTimeRange adds RFC3339 start/end to the given values when set. The
 // VictoriaLogs API accepts RFC3339, RFC3339Nano, Unix seconds, and a few
-// other shapes — we normalize on RFC3339 because every caller already
-// supplies (or defaults to) RFC3339.
+// other shapes — we normalize on RFC3339Nano so sub-second bounds are kept.
 func addVLTimeRange(params url.Values, start, end time.Time) {
 	if !start.IsZero() {
-		params.Set("start", start.Format(time.RFC3339))
+		params.Set("start", start.Format(time.RFC3339Nano))
 	}
 	if !end.IsZero() {
-		params.Set("end", end.Format(time.RFC3339))
+		params.Set("end", end.Format(time.RFC3339Nano))
 	}
 }
 
@@ -157,19 +170,28 @@ func (b *victoriaLogsBackend) listValueHits(ctx context.Context, urlPath string,
 	return out, nil
 }
 
-func (b *victoriaLogsBackend) ListLabelNames(ctx context.Context, start, end time.Time) ([]string, error) {
+func (b *victoriaLogsBackend) ListLabelNames(ctx context.Context, matcher string, start, end time.Time) ([]string, error) {
 	params := url.Values{}
-	params.Set("query", victoriaLogsAllQuery)
+	params.Set("query", logsQLOrAll(matcher))
 	addVLTimeRange(params, start, end)
 	return b.listValueHits(ctx, "/select/logsql/field_names", params)
 }
 
-func (b *victoriaLogsBackend) ListLabelValues(ctx context.Context, labelName string, start, end time.Time) ([]string, error) {
+func (b *victoriaLogsBackend) ListLabelValues(ctx context.Context, labelName, matcher string, start, end time.Time) ([]string, error) {
 	params := url.Values{}
-	params.Set("query", victoriaLogsAllQuery)
+	params.Set("query", logsQLOrAll(matcher))
 	params.Set("field", labelName)
 	addVLTimeRange(params, start, end)
 	return b.listValueHits(ctx, "/select/logsql/field_values", params)
+}
+
+// logsQLOrAll returns matcher if non-empty, otherwise the "match everything"
+// expression, so an empty matcher still searches across all streams.
+func logsQLOrAll(matcher string) string {
+	if matcher == "" {
+		return victoriaLogsAllQuery
+	}
+	return matcher
 }
 
 // QueryLogs runs a LogsQL query. Range and instant requests both go through

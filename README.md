@@ -1,5 +1,7 @@
 # 🤖 Grafana MCP
 
+Ветка синхронизирована с upstream `main`, включая релиз **2.0.2**. Используется официальный MCP Go SDK и путь Go-модуля `github.com/grafana/mcp-grafana/v2`. Удалённые upstream инструменты Sift больше не доступны; для HTTP-подключений с заголовками на каждый запрос используйте `streamable-http`.
+
 MCP-сервер для **Grafana**, который подключает AI-инструменты к Grafana через [Model Context Protocol](https://modelcontextprotocol.io/). Позволяет AI-агентам находить дашборды, запрашивать метрики и логи, проверять алерты, исследовать инциденты и управлять ресурсами через взаимодействие на естественном языке.
 
 Примеры использования:
@@ -38,7 +40,7 @@ AI-агент обращается к Grafana и её источникам да�
 - 🧠 **Dynamic Instructions** — инструкции для AI-агента формируются с учётом включённых категорий инструментов.
 - 🎛️ **Фильтрация инструментов** — выбор категорий через `--enabled-tools`, отключение через `--disable-<category>` и режим `--disable-write`.
 - 📦 **Экономия контекста** — краткая сводка дашборда, выборка свойств через JSONPath и точечные изменения вместо передачи полного JSON.
-- 🚨 **Расследование инцидентов** — Grafana Incident, Sift, OnCall и Asserts при наличии соответствующих сервисов и прав.
+- 🚨 **Расследование инцидентов** — Grafana Incident, OnCall и Asserts при наличии соответствующих сервисов и прав.
 - 🔐 **Аутентификация** — service account token, чтение токена из файла и Basic Auth.
 - 🖼️ **PNG-изображения** — рендеринг дашбордов и панелей через Grafana Image Renderer, включая preview из provisioning-репозитория.
 - 📈 **Локальная диагностика** — stderr-логи и журнал медленных запросов.
@@ -52,7 +54,7 @@ AI-агент обращается к Grafana и её источникам да�
 - **Grafana 9.0+**. Отдельные инструменты требуют дополнительных API, плагинов или сервисов.
 - **Service account token** с правами на нужные ресурсы (см. [Аутентификация](#-аутентификация)).
 - Предустановленный **GigaCode CLI** с поддержкой MCP и настроенным секретом `grafana/GRAFANA_SERVICE_ACCOUNT_TOKEN`.
-- **Go 1.26.3+** и **Git** для сборки бинарного файла.
+- **Go 1.26.9+** и **Git** для сборки бинарного файла.
 
 ### 2. Соберите бинарный файл
 
@@ -61,7 +63,7 @@ AI-агент обращается к Grafana и её источникам да�
 Скачайте репозиторий и выполните сборку:
 
 ```bash
-git clone https://github.com/grafana/mcp-grafana.git
+git clone https://github.com/Denis-spec989/mcp-grafana.git
 cd mcp-grafana
 go build -o dist/mcp-grafana ./cmd/mcp-grafana
 ```
@@ -197,16 +199,16 @@ TLS-флаги приведены в разделе [Безопасность](#
 | `list_pyroscope_profile_types` | Доступные типы профилей | «Какие профили доступны?» |
 | `list_pyroscope_label_names`, `list_pyroscope_label_values` | Метки профилей | «Какие сервисы профилируются?» |
 | `query_pyroscope` | Профили и метрики Pyroscope | «Покажи профиль CPU сервиса» |
+| `alerting_rules_read`, `alerting_silences_read` | Просмотр правил и заглушений алертов | «Какие правила настроены?» |
 | `alerting_manage_routing` | Notification policies, contact points и time intervals | «Куда отправляются уведомления об алертах?» |
 | `list_incidents`, `get_incident` | Поиск и детали инцидентов | «Покажи активные инциденты» |
-| `list_sift_investigations`, `get_sift_investigation`, `get_sift_analysis` | Расследования и результаты Sift | «Что обнаружило расследование?» |
 | `list_oncall_schedules`, `get_oncall_shift`, `get_current_oncall_users` | Расписания, смены и дежурные | «Кто сейчас дежурит?» |
 | `list_oncall_teams`, `list_oncall_users` | Команды и пользователи OnCall | «Покажи команды OnCall» |
 | `list_alert_groups`, `get_alert_group` | Группы оповещений OnCall | «Покажи открытые alert groups» |
 | `get_assertions` | Сводка Asserts для сущности | «Покажи assertions для сервиса» |
 | `get_annotations`, `get_annotation_tags` | Аннотации и теги | «Какие деплои отмечены на дашборде?» |
 | `list_snapshots`, `get_snapshot` | Снимки дашбордов | «Покажи сохранённые snapshots» |
-| `get_panel_image` | PNG панели или дашборда | «Сделай изображение панели latency» |
+| `get_panel_image` | PNG панели, дашборда или Explore | «Сделай изображение панели latency» |
 | `list_provisioning_repositories` | Репозитории provisioning и состояние синхронизации | «Какие git-sync репозитории подключены?» |
 | `validate_provisioning_file` | Проверка файла provisioning без применения | «Проверь дашборд из ветки feature» |
 | `get_plugin`, `search_plugin_information` | Проверка плагина и поиск в каталоге | «Найди плагин для ClickHouse» |
@@ -219,13 +221,12 @@ TLS-флаги приведены в разделе [Безопасность](#
 | Инструмент | Описание | Пример запроса |
 |---|---|---|
 | `update_dashboard` | Создание, полная замена или точечное изменение дашборда | «Добавь панель RPS на дашборд» |
+| `alerting_rules_write`, `alerting_silences_write`, `alerting_routing_write` | Изменение правил, заглушений и contact points | «Создай правило алерта» |
 | `create_folder` | Создание папки | «Создай папку команды backend» |
 | `create_incident` | Создание инцидента | «Создай инцидент о недоступности API» |
 | `add_activity_to_incident` | Запись в журнал инцидента | «Добавь результат проверки в инцидент» |
 | `create_annotation` | Создание аннотации, включая Graphite-формат | «Отметь время деплоя на дашборде» |
 | `update_annotation` | Частичное обновление аннотации | «Исправь текст аннотации» |
-| `find_error_pattern_logs` | Запуск Sift-анализа ошибок с созданием расследования | «Исследуй рост ошибок в логах» |
-| `find_slow_requests` | Запуск Sift-анализа медленных запросов | «Найди медленные запросы в Tempo» |
 | `create_snapshot`, `delete_snapshot` | Создание и удаление снимков | «Создай snapshot дашборда» |
 | `get_panel_image_and_save` | Сохранение PNG на машине MCP-сервера | «Сохрани панель в файл» |
 | `install_plugin` | Установка плагина в Grafana | «Установи плагин по его ID» |
@@ -234,7 +235,6 @@ TLS-флаги приведены в разделе [Безопасность](#
 
 | Инструмент | Обычный режим | С `--disable-write` |
 |---|---|---|
-| `alerting_manage_rules` | Просмотр, версии, создание, изменение и удаление alert rules | Только операции чтения |
 | `grafana_api_request` | Запросы к Grafana API с опциональным jq-фильтром ответа | Только GET |
 | `generate_deeplink` | Ссылки на дашборды, панели и Explore; опциональное сокращение URL | Полные ссылки; `shorten=true` игнорируется |
 
@@ -247,11 +247,9 @@ TLS-флаги приведены в разделе [Безопасность](#
 | `runpanelquery` | `run_panel_query` | Выполнение запросов панелей с диапазоном времени и переменными |
 | `examples` | `get_query_examples` | Примеры запросов для разных datasources |
 | `influxdb` | `query_influxdb` | InfluxQL (v1) и Flux (v2) |
-| `clickhouse` | `list_clickhouse_tables`, `describe_clickhouse_table`, `query_clickhouse` | Таблицы, схемы и SQL с макросами Grafana |
+| `sql` | `list_sql_databases`, `list_sql_tables`, `describe_sql_table`, `query_sql` | ClickHouse, Athena, Snowflake, MSSQL и PostgreSQL; выполнение SQL требует разрешения записи или явного включения через `--enable-write-tools` |
 | `cloudwatch` | `list_cloudwatch_namespaces`, `list_cloudwatch_metrics`, `list_cloudwatch_dimensions`, `query_cloudwatch` | Метрики AWS CloudWatch |
 | `graphite` | `query_graphite`, `list_graphite_metrics`, `list_graphite_tags`, `query_graphite_density` | Метрики и теги Graphite |
-| `athena` | `list_athena_catalogs`, `list_athena_databases`, `list_athena_tables`, `describe_athena_table`, `query_athena` | Каталоги, схемы и SQL Amazon Athena |
-| `snowflake` | `list_snowflake_tables`, `describe_snowflake_table`, `query_snowflake` | Таблицы и SQL Snowflake, включая `SNOWFLAKE.TELEMETRY.EVENTS` |
 | `elasticsearch` | `query_elasticsearch` | Elasticsearch/OpenSearch: Lucene и Query DSL |
 | `quickwit` | `query_quickwit` | Поиск логов и документов в Quickwit |
 | `admin` | `list_teams`, `list_users_by_org`, `list_all_roles`, `get_role_details`, `get_role_assignments`, `list_user_roles`, `list_team_roles`, `get_resource_permissions`, `get_resource_description` | Пользователи, команды, роли и права |
@@ -271,7 +269,7 @@ TLS-флаги приведены в разделе [Безопасность](#
 Стандартные категории встроенных инструментов:
 
 ```text
-search,datasource,incident,prometheus,loki,alerting,dashboard,folder,oncall,asserts,sift,pyroscope,navigation,annotations,rendering,snapshot,plugin,api,config,provisioning
+search,datasource,incident,prometheus,loki,alerting,dashboard,folder,oncall,asserts,pyroscope,navigation,tempo,annotations,rendering,snapshot,plugin,api,config,provisioning,docs,user
 ```
 
 Оставить основные встроенные инструменты для диагностики:
@@ -283,13 +281,13 @@ search,datasource,incident,prometheus,loki,alerting,dashboard,folder,oncall,asse
 Отключить отдельные категории, сохранив остальные стандартные:
 
 ```bash
-./dist/mcp-grafana --transport stdio --disable-oncall --disable-sift --disable-asserts
+./dist/mcp-grafana --transport stdio --disable-oncall --disable-asserts
 ```
 
 Сохранить стандартные категории и добавить выполнение запросов панелей:
 
 ```bash
-./dist/mcp-grafana --transport stdio --enabled-tools search,datasource,incident,prometheus,loki,alerting,dashboard,folder,oncall,asserts,sift,pyroscope,navigation,annotations,rendering,snapshot,plugin,api,config,provisioning,runpanelquery
+./dist/mcp-grafana --transport stdio --enabled-tools search,datasource,incident,prometheus,loki,alerting,dashboard,folder,oncall,asserts,pyroscope,navigation,tempo,annotations,rendering,snapshot,plugin,api,config,provisioning,docs,user,runpanelquery
 ```
 
 В конфигурации GigaCode CLI добавляйте флаги в массив `args`, сохраняя `"--transport", "stdio"`. Например, для ограничения записи: `"args": ["--transport", "stdio", "--disable-write"]`.
@@ -325,7 +323,7 @@ search,datasource,incident,prometheus,loki,alerting,dashboard,folder,oncall,asse
 
 ### Логи и телеметрия
 
-Сервер пишет логи в **stderr** и не отправляет собственные логи, traces, события использования или метрики в удалённый telemetry collector, включая запуск и завершение работы. Переменные `OTEL_EXPORTER_OTLP_*` не включают удалённый экспорт; CLI-флага для него нет.
+Сервер пишет логи в **stderr** и не отправляет собственные логи, traces, события использования или метрики в удалённый telemetry collector, включая запуск и завершение работы. Переменные `OTEL_EXPORTER_OTLP_*` не включают удалённый экспорт; Переменные `GRAFANA_USAGE_STATS`, `GRAFANA_USAGE_STATS_ENDPOINT` и флаг `--usage-stats` также не включают отправку статистики: в этом форке она принудительно отключена.
 
 Эта политика относится к телеметрии MCP-процесса. Рабочие запросы к Grafana и публичному каталогу плагинов, а также ответы MCP-клиенту выполняются по назначению. Передача данных самим AI-клиентом, Grafana, системными агентами и внешним сборщиком логов настраивается отдельно. При использовании Go SDK ответственность за подключённые logger, transport и OpenTelemetry providers лежит на вызывающем приложении.
 
@@ -371,7 +369,7 @@ search,datasource,incident,prometheus,loki,alerting,dashboard,folder,oncall,asse
 
 ## 🏗️ Разработка
 
-Требуются **Go 1.26.3+** и Make.
+Требуются **Go 1.26.9+** и Make.
 
 | Команда | Описание |
 |---|---|

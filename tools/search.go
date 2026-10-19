@@ -4,21 +4,23 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/mark3labs/mcp-go/server"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/grafana/grafana-openapi-client-go/client/search"
 	"github.com/grafana/grafana-openapi-client-go/models"
-	mcpgrafana "github.com/grafana/mcp-grafana"
+	mcpgrafana "github.com/grafana/mcp-grafana/v2"
 )
 
 var dashboardTypeStr = "dash-db"
 var folderTypeStr = "dash-folder"
 
 type SearchDashboardsParams struct {
-	Query string `json:"query" jsonschema:"description=The query to search for"`
-	Limit int    `json:"limit,omitempty" jsonschema:"default=50,description=Maximum number of results to return (max 100)"`
-	Page  int    `json:"page,omitempty" jsonschema:"default=1,description=Page number for pagination (1-indexed)"`
+	Query     string   `json:"query,omitempty" jsonschema:"description=Optional query. Omit to filter by folderUid\\, tag\\, or starred"`
+	FolderUID string   `json:"folderUid,omitempty" jsonschema:"description=Optional immediate folder UID (not nested)"`
+	Tag       []string `json:"tag,omitempty" jsonschema:"description=Optional tags to match (AND)"`
+	Starred   bool     `json:"starred,omitempty" jsonschema:"description=If true\\, only starred dashboards"`
+	Limit     int      `json:"limit,omitempty" jsonschema:"default=50,description=Maximum number of results to return (max 100)"`
+	Page      int      `json:"page,omitempty" jsonschema:"default=1,description=Page number for pagination (1-indexed)"`
 }
 
 type dashboardSearchHit struct {
@@ -61,9 +63,19 @@ func summarizeHitList(hits models.HitList) []dashboardSearchHit {
 func searchDashboards(ctx context.Context, args SearchDashboardsParams) (*SearchDashboardsResult, error) {
 	c := mcpgrafana.GrafanaClientFromContext(ctx)
 	params := search.NewSearchParamsWithContext(ctx)
+	params.SetType(&dashboardTypeStr)
 	if args.Query != "" {
 		params.SetQuery(&args.Query)
-		params.SetType(&dashboardTypeStr)
+	}
+	if args.FolderUID != "" {
+		params.SetFolderUIDs([]string{args.FolderUID})
+	}
+	if len(args.Tag) > 0 {
+		params.SetTag(args.Tag)
+	}
+	if args.Starred {
+		starred := true
+		params.SetStarred(&starred)
 	}
 
 	// Apply default limit if not specified
@@ -102,11 +114,14 @@ func searchDashboards(ctx context.Context, args SearchDashboardsParams) (*Search
 
 var SearchDashboards = mcpgrafana.MustTool(
 	"search_dashboards",
-	"Search for Grafana dashboards by a query string. Returns a list of matching dashboards with details like title, UID, folder, tags, and URL.",
+	"Search Grafana dashboards by query and/or folderUid, tag, and starred. Returns matching dashboards with title, UID, folder, tags, and URL.",
 	searchDashboards,
-	mcp.WithTitleAnnotation("Search dashboards"),
-	mcp.WithIdempotentHintAnnotation(true),
-	mcp.WithReadOnlyHintAnnotation(true),
+	mcpgrafana.WithTitleAnnotation("Search dashboards"),
+	mcpgrafana.WithIdempotentHintAnnotation(true),
+	mcpgrafana.WithReadOnlyHintAnnotation(true),
+	mcpgrafana.WithDestructiveHintAnnotation(false),
+	mcpgrafana.WithOpenWorldHintAnnotation(false),
+	mcpgrafana.RequiresPermissions("dashboards:read", "folders:read"),
 )
 
 type SearchFoldersParams struct {
@@ -134,12 +149,15 @@ var SearchFolders = mcpgrafana.MustTool(
 	"search_folders",
 	"Search for Grafana folders by a query string. Returns matching folders with details like title, UID, and URL.",
 	searchFolders,
-	mcp.WithTitleAnnotation("Search folders"),
-	mcp.WithIdempotentHintAnnotation(true),
-	mcp.WithReadOnlyHintAnnotation(true),
+	mcpgrafana.WithTitleAnnotation("Search folders"),
+	mcpgrafana.WithIdempotentHintAnnotation(true),
+	mcpgrafana.WithReadOnlyHintAnnotation(true),
+	mcpgrafana.WithDestructiveHintAnnotation(false),
+	mcpgrafana.WithOpenWorldHintAnnotation(false),
+	mcpgrafana.RequiresPermissions("folders:read"),
 )
 
-func AddSearchTools(mcp *server.MCPServer) {
-	SearchDashboards.Register(mcp)
-	SearchFolders.Register(mcp)
+func AddSearchTools(s *mcp.Server) {
+	SearchDashboards.Register(s)
+	SearchFolders.Register(s)
 }

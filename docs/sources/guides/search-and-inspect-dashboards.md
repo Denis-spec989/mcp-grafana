@@ -8,7 +8,8 @@ keywords:
   - panels
   - MCP
 weight: 3
-aliases: []
+aliases:
+  - /docs/grafana-cloud/machine-learning/mcp/guides/search-and-inspect-dashboards/
 ---
 
 # Search and inspect dashboards
@@ -26,7 +27,7 @@ You ask your assistant to find dashboards or to summarize a dashboard, list its 
 
 ## Search for dashboards
 
-Ask the assistant to search for dashboards by title or other criteria. The server’s search tool returns matching dashboards with metadata. Use this to find the UID or folder of the dashboard you want.
+Ask the assistant to search for dashboards by title, folder, tag, or starred status. The server’s search tool returns matching dashboards with metadata. Use this to find the UID or folder of the dashboard you want.
 
 ## Get a dashboard summary or panel queries
 
@@ -35,6 +36,10 @@ When you need an overview of a dashboard without the full JSON, ask for a **dash
 ## Get specific properties with JSONPath
 
 When you only need certain parts of a dashboard (for example, one panel’s config), ask the assistant to use **get_dashboard_property** with a JSONPath expression (for example, `$.panels[0].title`). That fetches only the requested data and avoids loading the full dashboard.
+
+## Inspect a previous dashboard version
+
+To see how a dashboard looked at a previous save, first list its versions. The server returns compact metadata only (version number, author, timestamp, and save message), not the full JSON. Then ask for the dashboard by UID with that version number. Omitting `version` still returns the current dashboard.
 
 ## Next steps
 

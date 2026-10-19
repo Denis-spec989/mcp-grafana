@@ -31,7 +31,6 @@ Metrics are disabled by default and require the SSE or streamable HTTP transport
 | Metric | Type | Description |
 |--------|------|-------------|
 | `mcp_server_operation_duration_seconds` | Histogram | MCP operation duration (labels: `mcp_method_name`, `gen_ai_tool_name`, `error_type`, `network_transport`, `mcp_protocol_version`) |
-| `mcp_server_session_duration_seconds` | Histogram | MCP client session duration (labels: `network_transport`, `mcp_protocol_version`) |
 | `http_server_request_duration_seconds` | Histogram | HTTP server request duration (from otelhttp) |
 
 Metrics are returned when a client scrapes `/metrics`; the MCP server does not push them to a collector. Anyone with network access to that endpoint can scrape it. Use a trusted listen address and restrict network access.
@@ -53,17 +52,19 @@ The default threshold of `0` disables slow-request events. Events include the MC
 
 ## Remote telemetry policy
 
-This build does not configure OTLP trace or log exporters, background export queues, or shutdown export. `OTEL_EXPORTER_OTLP_*` environment variables, including signal-specific traces, logs, and metrics settings, cannot enable telemetry export. There is no flag to enable remote export. OpenTelemetry instrumentation and libraries remain where needed for local monitoring.
+This build does not configure OTLP trace or log exporters, background export queues, or shutdown export. `OTEL_EXPORTER_OTLP_*` environment variables, including signal-specific traces, logs, and metrics settings, cannot enable telemetry export. `--usage-stats`, `GRAFANA_USAGE_STATS`, and `GRAFANA_USAGE_STATS_ENDPOINT` cannot enable anonymous usage reports in this fork. OpenTelemetry instrumentation and libraries remain where needed for local monitoring.
 
-The policy applies to the MCP process's own telemetry. Normal tool requests to Grafana, datasource MCP endpoints, and the public plugin catalog remain available. Tool results still go to the MCP client. Your MCP/AI client, Grafana, operating-system agents, or a separate collector reading stderr or `/metrics` can transmit data according to their own configuration. Configure those components separately. Go library consumers that supply their own logger, transport, or OpenTelemetry providers are responsible for those integrations.
+The policy applies to the MCP process's own telemetry. Normal tool requests to Grafana, datasource endpoints, and the public plugin catalog remain available. Tool results still go to the MCP client. Your MCP/AI client, Grafana, operating-system agents, or a separate collector reading stderr or `/metrics` can transmit data according to their own configuration. Configure those components separately. Go library consumers that supply their own logger, transport, or OpenTelemetry providers are responsible for those integrations.
 
 ## Run with Docker and local metrics
 
 ```bash
+docker build -t mcp-grafana-local .
+
 docker run --rm -p 127.0.0.1:8000:8000 \
   -e GRAFANA_URL=http://grafana:3000 \
   -e GRAFANA_SERVICE_ACCOUNT_TOKEN=<your token> \
-  grafana/mcp-grafana \
+  mcp-grafana-local \
   -t streamable-http --metrics
 ```
 

@@ -3,11 +3,10 @@ package tools
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"image"
-	_ "image/png" // register the PNG decoder for image.DecodeConfig
+	_ "image/png" // register the PNG decoder
 	"io"
 	"net/http"
 	"net/url"
@@ -18,10 +17,9 @@ import (
 	"time"
 
 	"github.com/invopop/jsonschema"
-	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/mark3labs/mcp-go/server"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	mcpgrafana "github.com/grafana/mcp-grafana"
+	mcpgrafana "github.com/grafana/mcp-grafana/v2"
 )
 
 // StringOrSlice is a type that can be unmarshaled from either a JSON string
@@ -72,17 +70,28 @@ func (StringOrSlice) JSONSchema() *jsonschema.Schema {
 type GetPanelImageParams struct {
 	DashboardUID string                   `json:"dashboardUid,omitempty" jsonschema:"description=The UID of a stored dashboard containing the panel. Required unless provisioningPreview is provided."`
 	PanelID      *int                     `json:"panelId,omitempty" jsonschema:"description=The ID of the panel to render. If omitted\\, the entire dashboard is rendered"`
-	Width        *int                     `json:"width,omitempty" jsonschema:"description=Width of the rendered image in pixels. Defaults to 1000"`
-	Height       *int                     `json:"height,omitempty" jsonschema:"description=Height of the rendered image in pixels. Defaults to 500"`
+	Width        *int                     `json:"width,omitempty" jsonschema:"description=Width of the rendered image in pixels. Defaults to 1000\\, capped at 3000. The image renderer raises values below its configured minimum viewport width (1000 by default)."`
+	Height       *int                     `json:"height,omitempty" jsonschema:"description=Height of the rendered image in pixels. Defaults to 500 (1000 for explore)\\, capped at 3000. The image renderer raises values below its configured minimum viewport height (500 by default)."`
 	TimeRange    *RenderTimeRange         `json:"timeRange,omitempty" jsonschema:"description=Time range for the rendered image"`
 	Variables    map[string]StringOrSlice `json:"variables,omitempty" jsonschema:"description=Dashboard variables to apply. Values can be a single string or an array of strings for multi-value variables (e.g.\\, {\"var-datasource\": \"prometheus\"\\, \"var-instance\": [\"server1\"\\, \"server2\"]})"`
 	Theme        *string                  `json:"theme,omitempty" jsonschema:"description=Theme for the rendered image: light or dark. Defaults to dark"`
 	Scale        *int                     `json:"scale,omitempty" jsonschema:"description=Scale factor for the image (1-3). Defaults to 1"`
-	Timeout      *int                     `json:"timeout,omitempty" jsonschema:"description=Rendering timeout in seconds. Defaults to 60"`
+	Timeout      *int                     `json:"timeout,omitempty" jsonschema:"description=Rendering timeout in seconds. Defaults to 60\\, capped at 120"`
 	// ProvisioningPreview renders a dashboard from a provisioning repository
 	// branch that has not yet been merged or applied. Mutually exclusive with
 	// dashboardUid.
 	ProvisioningPreview *ProvisioningPreview `json:"provisioningPreview,omitempty" jsonschema:"description=Render a dashboard from a provisioning repository branch (e.g. a git-sync PR preview). Mutually exclusive with dashboardUid."`
+	// Explore renders an ad-hoc Explore view instead of a stored dashboard.
+	// Mutually exclusive with dashboardUid and provisioningPreview.
+	Explore *RenderExplore `json:"explore,omitempty" jsonschema:"description=Render an ad-hoc Explore view for a datasource and queries instead of a stored dashboard. Mutually exclusive with dashboardUid and provisioningPreview. Requires Grafana 10.2 or later."`
+}
+
+// RenderExplore describes an Explore view to render. The state is encoded the
+// same way as the explore links produced by generate_deeplink; the time range
+// comes from GetPanelImageParams.TimeRange.
+type RenderExplore struct {
+	DatasourceUID string                   `json:"datasourceUid" jsonschema:"required,description=Datasource UID to query"`
+	Queries       []map[string]interface{} `json:"queries,omitempty" jsonschema:"description=List of query objects (e.g. [{\"refId\":\"A\"\\, \"expr\":\"up\"}])"`
 }
 
 type RenderTimeRange struct {
@@ -105,36 +114,59 @@ func getPanelImage(ctx context.Context, args GetPanelImageParams) (*mcp.CallTool
 	if err != nil {
 		return nil, err
 	}
+	renderOrg := mcpgrafana.GrafanaConfigFromContext(ctx).OrgID
 
-	// Return the image as base64 encoded data using MCP's image content type
-	base64Data := base64.StdEncoding.EncodeToString(imageData)
+	// Rendering succeeded, so always return the image. The deeplink is
+	// best-effort metadata added only if it builds successfully.
+	// ImageContent.Data is []byte — the SDK base64-encodes on the wire.
+	content := []mcp.Content{
+		&mcp.ImageContent{
+			Data:     imageData,
+			MIMEType: "image/png",
+		},
+	}
+
+	// Use the public base URL, not config.URL, which may be an in-cluster
+	// endpoint the browser can't reach.
+	var structured any
+	if deeplinkBase, err := grafanaBaseURLFromContext(ctx); err == nil && deeplinkResolvesInRenderOrg(ctx, renderOrg) {
+		if deeplink, err := buildDashboardDeeplink(deeplinkBase, args); err == nil {
+			content = append(content, &mcp.TextContent{
+				Meta: mcpgrafana.NewUIContentMeta(mcpgrafana.UIContentKindDeeplink),
+				Text: deeplink,
+			})
+			// Also in structuredContent: some hosts (e.g. Claude) don't forward
+			// content items' _meta to the MCP App, so the viewer can't find the
+			// link in content alone.
+			structured = map[string]any{"deeplink": deeplink}
+		}
+	}
 
 	return &mcp.CallToolResult{
-		Content: []mcp.Content{
-			mcp.ImageContent{
-				Type:     "image",
-				Data:     base64Data,
-				MIMEType: "image/png",
-			},
-		},
+		Content:           content,
+		StructuredContent: structured,
 	}, nil
 }
 
-// renderPanelImage builds the render URL, executes the HTTP request through the
-// shared middleware chain (TLS, auth, extra headers, org ID, user-agent, otel),
-// and returns the raw PNG bytes. Shared by getPanelImage (which base64-encodes
-// the bytes into MCP image content) and getPanelImageAndSave (which writes them
-// to the filesystem).
+// renderPanelImage returns the raw PNG bytes through the shared Grafana transport.
 func renderPanelImage(ctx context.Context, args GetPanelImageParams) ([]byte, error) {
 	config := mcpgrafana.GrafanaConfigFromContext(ctx)
 	baseURL := config.URL
 
 	if baseURL == "" {
-		return nil, fmt.Errorf("grafana URL not configured. Please set GRAFANA_URL environment variable or X-Grafana-URL header")
+		return nil, fmt.Errorf("grafana URL not configured. Please set GRAFANA_URL environment variable")
 	}
 
-	// Build the render URL
-	renderURL, err := buildRenderURL(baseURL, args)
+	// The org to render from comes from config.OrgID, which
+	// OrgIDOverrideMiddleware sets from the per-call orgId argument when dynamic
+	// multi-org is enabled and which otherwise carries the connection's org. This
+	// tool declares no orgId of its own, so it behaves like every other tool: the
+	// argument exists only when --dynamic-multi-org is set. Reading the org from
+	// the context also keeps the X-Grafana-Org-Id header the transport adds in
+	// step with the render URL's targetOrgId.
+	renderOrg := config.OrgID
+
+	renderURL, err := buildRenderURL(baseURL, renderOrg, args)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build render URL: %w", err)
 	}
@@ -149,13 +181,9 @@ func renderPanelImage(ctx context.Context, args GetPanelImageParams) ([]byte, er
 		return nil, fmt.Errorf("failed to build HTTP transport: %w", err)
 	}
 
-	timeout := 60 * time.Second
-	if args.Timeout != nil && *args.Timeout > 0 {
-		timeout = time.Duration(*args.Timeout) * time.Second
-	}
 	httpClient := &http.Client{
 		Transport: transport,
-		Timeout:   timeout,
+		Timeout:   renderTimeout(args),
 	}
 
 	// Create request
@@ -193,15 +221,46 @@ func renderPanelImage(ctx context.Context, args GetPanelImageParams) ([]byte, er
 	return imageData, nil
 }
 
-func buildRenderURL(baseURL string, args GetPanelImageParams) (string, error) {
+// Upper bounds for caller-supplied render parameters. The dimension cap matches
+// the image renderer's default maximum viewport size.
+const (
+	defaultRenderTimeout = 60 * time.Second
+	maxRenderTimeoutSecs = 120
+	maxRenderDimension   = 3000
+)
+
+func renderTimeout(args GetPanelImageParams) time.Duration {
+	if args.Timeout == nil || *args.Timeout <= 0 {
+		return defaultRenderTimeout
+	}
+	// Clamp before converting so large values cannot overflow the Duration.
+	return time.Duration(min(*args.Timeout, maxRenderTimeoutSecs)) * time.Second
+}
+
+func buildRenderURL(baseURL string, orgID int64, args GetPanelImageParams) (string, error) {
 	// Validate that exactly one source is set.
 	hasUID := args.DashboardUID != ""
 	hasPreview := args.ProvisioningPreview != nil
-	if hasUID == hasPreview {
-		if hasUID {
-			return "", fmt.Errorf("dashboardUid and provisioningPreview are mutually exclusive; pass exactly one")
+	hasExplore := args.Explore != nil
+	sources := 0
+	for _, set := range []bool{hasUID, hasPreview, hasExplore} {
+		if set {
+			sources++
 		}
-		return "", fmt.Errorf("either dashboardUid or provisioningPreview must be set")
+	}
+	if sources != 1 {
+		if sources > 1 {
+			return "", fmt.Errorf("dashboardUid, provisioningPreview and explore are mutually exclusive; pass exactly one")
+		}
+		return "", fmt.Errorf("one of dashboardUid, provisioningPreview or explore must be set")
+	}
+	if hasExplore {
+		if args.Explore.DatasourceUID == "" {
+			return "", fmt.Errorf("explore.datasourceUid is required")
+		}
+		if args.PanelID != nil {
+			return "", fmt.Errorf("panelId cannot be used with explore")
+		}
 	}
 	if hasPreview {
 		if err := validateRepoSlug("provisioningPreview.repo", args.ProvisioningPreview.Repo); err != nil {
@@ -224,7 +283,25 @@ func buildRenderURL(baseURL string, args GetPanelImageParams) (string, error) {
 	// the same route is used for both since the preview UI handles ?panelId
 	// via the standard kiosk/viewPanel mechanism.
 	var renderPath string
-	if hasPreview {
+	if hasExplore {
+		// The renderer loads /explore in a headless browser, so the state is
+		// encoded exactly as in an explore deeplink.
+		renderPath = "/render/explore"
+		exploreParams, err := buildExploreRenderParams(args)
+		if err != nil {
+			return "", err
+		}
+		for key, values := range exploreParams {
+			for _, v := range values {
+				params.Add(key, v)
+			}
+		}
+		// Newer renderers wait for a "render done" signal that only dashboards
+		// send (behind Grafana's reportRenderBinding flag), so an Explore render
+		// would hang until it times out. Ask them to poll instead; older
+		// renderers ignore the param.
+		params.Set("forcePollingMode", "true")
+	} else if hasPreview {
 		// Repo is a single segment and gets the stricter url.PathEscape (which
 		// also encodes sub-delim characters like @, $, &, ;, =, :). For the
 		// multi-segment file path we use url.URL.EscapedPath() so structural /
@@ -253,15 +330,19 @@ func buildRenderURL(baseURL string, args GetPanelImageParams) (string, error) {
 			params.Set("panelId", strconv.Itoa(*args.PanelID))
 		}
 	}
-
 	// Set dimensions
 	width := 1000
 	height := 500
+	if hasExplore {
+		// Explore shows its query editor above the graph and scrolls inside
+		// its own container (so height=-1 doesn't help); give it room.
+		height = 1000
+	}
 	if args.Width != nil {
-		width = *args.Width
+		width = min(*args.Width, maxRenderDimension)
 	}
 	if args.Height != nil {
-		height = *args.Height
+		height = min(*args.Height, maxRenderDimension)
 	}
 	params.Set("width", strconv.Itoa(width))
 	params.Set("height", strconv.Itoa(height))
@@ -273,8 +354,8 @@ func buildRenderURL(baseURL string, args GetPanelImageParams) (string, error) {
 	}
 	params.Set("scale", strconv.Itoa(scale))
 
-	// Add time range
-	if args.TimeRange != nil {
+	// Add time range. Explore carries it inside the pane state instead.
+	if args.TimeRange != nil && !hasExplore {
 		if args.TimeRange.From != "" {
 			params.Set("from", args.TimeRange.From)
 		}
@@ -289,10 +370,23 @@ func buildRenderURL(baseURL string, args GetPanelImageParams) (string, error) {
 	}
 
 	// Add dashboard variables (supports multi-value via params.Add)
-	for key, values := range args.Variables {
-		for _, v := range values {
-			params.Add(key, v)
+	if !hasExplore {
+		for key, values := range args.Variables {
+			for _, v := range values {
+				params.Add(key, v)
+			}
 		}
+	}
+
+	// Select the org to render from. The image renderer drives a headless browser
+	// whose request org is set by the backend from the targetOrgId query param;
+	// the X-Grafana-Org-Id header (set by the transport) is ignored by the render
+	// path. We deliberately use targetOrgId rather than orgId: orgId is read by
+	// the frontend, which persists an org switch via /api/user/using — that would
+	// change the user's active org for every later request. targetOrgId only
+	// scopes this single render.
+	if orgID > 0 {
+		params.Set("targetOrgId", strconv.FormatInt(orgID, 10))
 	}
 
 	// Add kiosk mode options for cleaner rendering
@@ -301,15 +395,124 @@ func buildRenderURL(baseURL string, args GetPanelImageParams) (string, error) {
 	return fmt.Sprintf("%s%s?%s", baseURL, renderPath, params.Encode()), nil
 }
 
+// buildExploreRenderParams returns the Explore URL state for an Explore render
+// or its deeplink, reusing the pane builder behind generate_deeplink.
+func buildExploreRenderParams(args GetPanelImageParams) (url.Values, error) {
+	var tr *TimeRange
+	if args.TimeRange != nil {
+		tr = &TimeRange{From: args.TimeRange.From, To: args.TimeRange.To}
+	}
+	uid := args.Explore.DatasourceUID
+	return buildExplorePanesParams(GenerateDeeplinkParams{
+		ResourceType:  "explore",
+		DatasourceUID: &uid,
+		Queries:       args.Explore.Queries,
+		TimeRange:     tr,
+	})
+}
+
+// deeplinkResolvesInRenderOrg reports whether a dashboard URL carrying no org
+// would open in renderOrg for this identity.
+//
+// The link cannot carry one: `?orgId=N` is intercepted by Grafana's global
+// OrgRedirect middleware, which persists the switch onto the user's record, and
+// neither targetOrgId (render backend only) nor X-Grafana-Org-Id (not sendable
+// by a browser) substitutes. So when the render org is not where the viewer would
+// land, omit the link rather than point it at the wrong dashboard — UIDs are
+// unique only within an org. The image is unaffected.
+//
+// A non-positive renderOrg means no org reached the render (as in buildRenderURL
+// and OrgIDRoundTripper), so it used the identity's own org and the link agrees,
+// checked without a request. Any other org needs the lookup, whether it came
+// from a per-call orgId or from the connection; a failed lookup omits the link.
+func deeplinkResolvesInRenderOrg(ctx context.Context, renderOrg int64) bool {
+	if renderOrg <= 0 {
+		return true
+	}
+	viewerOrg, err := mcpgrafana.UserPersistedOrgID(ctx)
+	if err != nil {
+		return false
+	}
+	return viewerOrg == renderOrg
+}
+
+// buildDashboardDeeplink returns the Grafana UI URL for the rendered
+// dashboard, mirroring buildRenderURL's view (panel, time range, variables)
+// so the deeplink matches the PNG.
+func buildDashboardDeeplink(baseURL string, args GetPanelImageParams) (string, error) {
+	baseURL = strings.TrimRight(baseURL, "/")
+
+	if args.Explore != nil {
+		params, err := buildExploreRenderParams(args)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("%s/explore?%s", baseURL, params.Encode()), nil
+	}
+
+	var uid *string
+	if args.DashboardUID != "" {
+		uid = &args.DashboardUID
+	}
+	var preview *DeeplinkProvisioningPreview
+	if args.ProvisioningPreview != nil {
+		preview = &DeeplinkProvisioningPreview{
+			Repo: args.ProvisioningPreview.Repo,
+			Path: args.ProvisioningPreview.Path,
+			Ref:  args.ProvisioningPreview.Ref,
+		}
+	}
+
+	target, err := buildDashboardTargetURL(baseURL, uid, preview)
+	if err != nil {
+		return "", err
+	}
+
+	extra := url.Values{}
+	if args.PanelID != nil {
+		extra.Set("viewPanel", strconv.Itoa(*args.PanelID))
+	}
+	if args.TimeRange != nil {
+		// Normalize RFC 3339 to epoch ms for Grafana's Scenes URL parser.
+		if args.TimeRange.From != "" {
+			extra.Set("from", toGrafanaTimeParam(args.TimeRange.From))
+		}
+		if args.TimeRange.To != "" {
+			extra.Set("to", toGrafanaTimeParam(args.TimeRange.To))
+		}
+	}
+	for key, values := range args.Variables {
+		for _, v := range values {
+			extra.Add(key, v)
+		}
+	}
+
+	if len(extra) == 0 {
+		return target, nil
+	}
+	separator := "?"
+	if strings.Contains(target, "?") {
+		separator = "&"
+	}
+	return target + separator + extra.Encode(), nil
+}
+
 var GetPanelImage = mcpgrafana.MustTool(
 	"get_panel_image",
-	"Render a Grafana dashboard panel or full dashboard as a PNG image. Returns the image as base64 encoded data. Requires the Grafana Image Renderer service to be installed. "+
-		"Either dashboardUid (for stored dashboards) or provisioningPreview (for dashboards staged on a provisioning repository branch, e.g. a git-sync PR) must be supplied. "+
+	"Render a Grafana dashboard panel, full dashboard or Explore view as a PNG image. Returns the image as base64 encoded data. Requires the Grafana Image Renderer service to be installed. "+
+		"Exactly one of dashboardUid (for stored dashboards), provisioningPreview (for dashboards staged on a provisioning repository branch, e.g. a git-sync PR) or explore (an ad-hoc datasource query rendered in Explore, no saved dashboard needed) must be supplied. "+
 		"Use this for generating visual snapshots of dashboards for reports, alerts, or presentations.",
 	getPanelImage,
-	mcp.WithTitleAnnotation("Get panel or dashboard image"),
-	mcp.WithIdempotentHintAnnotation(true),
-	mcp.WithReadOnlyHintAnnotation(true),
+	mcpgrafana.WithTitleAnnotation("Get panel or dashboard image"),
+	mcpgrafana.WithIdempotentHintAnnotation(true),
+	mcpgrafana.WithUIResource(mcpgrafana.PanelViewerResourceURI),
+	mcpgrafana.WithReadOnlyHintAnnotation(true),
+	mcpgrafana.WithDestructiveHintAnnotation(false),
+	mcpgrafana.WithOpenWorldHintAnnotation(false),
+	mcpgrafana.RequiresPermissions("dashboards:read"),
+	mcpgrafana.RequiresPermissions(datasourceQuery...),
+	// explore renders /explore; provisioningPreview renders a repository preview.
+	mcpgrafana.RequiresPermissions("datasources:explore", "provisioning.repositories:read"),
 )
 
 // GetPanelImageAndSaveParams extends the rendering parameters with a target
@@ -356,26 +559,31 @@ func getPanelImageAndSave(ctx context.Context, args GetPanelImageAndSaveParams) 
 		dims = fmt.Sprintf("%dx%d, ", cfg.Width, cfg.Height)
 	}
 
-	return mcp.NewToolResultText(
+	return mcpgrafana.NewToolResultText(
 		fmt.Sprintf("Saved panel image to:\n%s\n(image/png, %s%d bytes)", absPath, dims, len(imageData)),
 	), nil
 }
 
 var GetPanelImageAndSave = mcpgrafana.MustTool(
 	"get_panel_image_and_save",
-	"Render a Grafana dashboard panel or full dashboard as a PNG image and save it to a file on the server's local filesystem. "+
-		"Accepts the same rendering options as get_panel_image (dashboardUid or provisioningPreview, panelId, time range, variables, theme, scale). "+
+	"Render a Grafana dashboard panel, full dashboard or Explore view as a PNG image and save it to a file on the server's local filesystem. "+
+		"Exactly one of dashboardUid, provisioningPreview or explore must be supplied. Supports panelId, time range, variables, theme and scale. "+
 		"Provide directory and filename; the directory is created if missing and an existing file is overwritten. "+
 		"Returns the absolute file path and image metadata (not the image bytes). Requires the Grafana Image Renderer service to be installed.",
 	getPanelImageAndSave,
-	mcp.WithTitleAnnotation("Get panel or dashboard image and save to file"),
-	mcp.WithIdempotentHintAnnotation(true),
-	mcp.WithReadOnlyHintAnnotation(false),
+	mcpgrafana.WithTitleAnnotation("Get panel or dashboard image and save to file"),
+	mcpgrafana.WithIdempotentHintAnnotation(true),
+	mcpgrafana.WithReadOnlyHintAnnotation(false),
+	mcpgrafana.WithDestructiveHintAnnotation(true),
+	mcpgrafana.WithOpenWorldHintAnnotation(false),
+	mcpgrafana.RequiresPermissions("dashboards:read"),
+	mcpgrafana.RequiresPermissions(datasourceQuery...),
+	mcpgrafana.RequiresPermissions("datasources:explore", "provisioning.repositories:read"),
 )
 
-func AddRenderingTools(mcp *server.MCPServer, enableWriteTools bool) {
-	GetPanelImage.Register(mcp)
+func AddRenderingTools(s *mcp.Server, enableWriteTools bool) {
+	GetPanelImage.Register(s)
 	if enableWriteTools {
-		GetPanelImageAndSave.Register(mcp)
+		GetPanelImageAndSave.Register(s)
 	}
 }

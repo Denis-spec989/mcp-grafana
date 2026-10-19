@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
-	mcpgrafana "github.com/grafana/mcp-grafana"
+	mcpgrafana "github.com/grafana/mcp-grafana/v2"
 )
 
 // dsQueryPayload builds the standard /api/ds/query request envelope.
@@ -118,86 +118,4 @@ func framesToTabularRows(resp *backend.QueryDataResponse) ([]string, []map[strin
 	}
 
 	return columns, rows, nil
-}
-
-// toInt64FromRow extracts an int64 from a row value that may be any of the
-// numeric types (or their pointer variants) the SDK's data.Field can hold.
-func toInt64FromRow(v interface{}) int64 {
-	switch n := v.(type) {
-	case float64:
-		return int64(n)
-	case *float64:
-		if n != nil {
-			return int64(*n)
-		}
-	case float32:
-		return int64(n)
-	case *float32:
-		if n != nil {
-			return int64(*n)
-		}
-	case int64:
-		return n
-	case *int64:
-		if n != nil {
-			return *n
-		}
-	case int32:
-		return int64(n)
-	case *int32:
-		if n != nil {
-			return int64(*n)
-		}
-	case int16:
-		return int64(n)
-	case *int16:
-		if n != nil {
-			return int64(*n)
-		}
-	case int8:
-		return int64(n)
-	case *int8:
-		if n != nil {
-			return int64(*n)
-		}
-	case uint64:
-		return int64(n)
-	case *uint64:
-		if n != nil {
-			return int64(*n)
-		}
-	case uint32:
-		return int64(n)
-	case *uint32:
-		if n != nil {
-			return int64(*n)
-		}
-	case uint16:
-		return int64(n)
-	case *uint16:
-		if n != nil {
-			return int64(*n)
-		}
-	case uint8:
-		return int64(n)
-	case *uint8:
-		if n != nil {
-			return int64(*n)
-		}
-	}
-	return 0
-}
-
-// toStringFromRow extracts a string from a row value that may be string or
-// *string depending on the SDK field type.
-func toStringFromRow(v interface{}) string {
-	switch s := v.(type) {
-	case string:
-		return s
-	case *string:
-		if s != nil {
-			return *s
-		}
-	}
-	return ""
 }

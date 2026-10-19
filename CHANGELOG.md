@@ -5,6 +5,313 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.2] - 2026-10-07
+
+### Added
+
+- `get_panel_image` can render an ad-hoc Explore view as a PNG via a new `explore` input (datasource UID and queries), without saving a dashboard first; requires Grafana 10.2+ ([#1298](https://github.com/grafana/mcp-grafana/pull/1298))
+- `update_dashboard` returns an absolute dashboard deeplink in its `url` field, using Grafana's public URL when available ([#1300](https://github.com/grafana/mcp-grafana/pull/1300))
+
+### Fixed
+
+- `query_cloudwatch` accepts percentile statistics such as `p95` and `p99.9`; `statistic` was previously restricted to an enum of basic statistics ([#1299](https://github.com/grafana/mcp-grafana/pull/1299))
+- Tool and parameter descriptions no longer contain model directives or references to other tools, to meet connector directory requirements ([#1304](https://github.com/grafana/mcp-grafana/pull/1304))
+
+## [2.0.1] - 2026-10-06
+
+### Added
+
+- `update_dashboard` now steers models towards schema v2 for new dashboards, keeps existing dashboards in their stored schema, and includes minimal v2 examples (grid and tabs layouts) in its description ([#1294](https://github.com/grafana/mcp-grafana/pull/1294))
+
+### Fixed
+
+- `update_dashboard` no longer silently overwrites a v2 dashboard with a v1 `panels[]` body, which dropped its v2 structure such as tabs; it now returns an error suggesting patches or a v2 body. New v2 dashboards are created at the most stable v2 API version Grafana serves instead of a hardcoded `v2beta1` ([#1275](https://github.com/grafana/mcp-grafana/pull/1275))
+- `run_panel_query` works on schema v2 dashboards instead of failing with `dashboard has no panels` ([#1287](https://github.com/grafana/mcp-grafana/pull/1287))
+- Datasource requests no longer treat an HTML page returned by the fallback `/resources` route (such as Loki's web UI) as success, which caused `invalid character '<'` errors that persisted until restart ([#1295](https://github.com/grafana/mcp-grafana/pull/1295))
+- Tool descriptions no longer show a literal `\,` in place of every comma ([#1296](https://github.com/grafana/mcp-grafana/pull/1296))
+- The trace and panel viewer MCP apps declare `data:` resources in their CSP, so hosts like MCP Inspector no longer block their embedded fonts and images ([#1284](https://github.com/grafana/mcp-grafana/pull/1284))
+
+## [2.0.0] - 2026-09-29
+
+2.0 moves the server from `mark3labs/mcp-go` to the official [MCP Go SDK](https://github.com/modelcontextprotocol/go-sdk). The major version bump is for the Go library: the SDK's types are part of this module's exported API.
+
+For most people running the server there is nothing to change. You are only affected if you:
+
+- import `mcp-grafana` as a Go library (new module path and SDK types)
+- use the Sift tools, which have been removed
+- call `alerting_manage_rules` or `alerting_manage_silences` directly, rather than letting your client discover tools
+- use the SSE transport with per-request headers (Grafana URL, credentials, org ID or forwarded headers); switch to streamable HTTP
+
+### Changed
+
+- **Breaking:** The server now uses the official [MCP Go SDK](https://github.com/modelcontextprotocol/go-sdk) instead of `mark3labs/mcp-go` ([#1180](https://github.com/grafana/mcp-grafana/pull/1180)). Over SSE, per-request headers no longer reach tool calls, so per-call Grafana URL overrides, credentials, org ID and forwarded headers only work over streamable HTTP. `--session-idle-timeout-minutes` is still accepted but ignored
+- **Breaking:** The Go module path is now `github.com/grafana/mcp-grafana/v2`; importers must update their import paths ([#1232](https://github.com/grafana/mcp-grafana/pull/1232))
+- **Breaking:** The alerting tools are split into read and write tools, so read-only credentials and `--disable-write` keep read access: `alerting_manage_rules` becomes `alerting_rules_read` and `alerting_rules_write`, and `alerting_manage_silences` becomes `alerting_silences_read` and `alerting_silences_write` ([#1233](https://github.com/grafana/mcp-grafana/pull/1233))
+- Anonymous usage statistics reporting is now enabled by default. Opt out with `--usage-stats=disabled`, `GRAFANA_USAGE_STATS=disabled` or `DO_NOT_TRACK=1` ([#1197](https://github.com/grafana/mcp-grafana/pull/1197))
+
+### Added
+
+- `alerting_routing_write` creates Grafana-managed contact points ([#1245](https://github.com/grafana/mcp-grafana/pull/1245))
+
+### Removed
+
+- **Breaking:** The deprecated Sift tools and the `sift` tool category ([#1191](https://github.com/grafana/mcp-grafana/pull/1191))
+
+### Fixed
+
+- Browser clients on an allowed CORS origin can send the `X-Grafana-URL`, `X-Grafana-Service-Account-Token`, `X-Grafana-API-Key` and `X-Grafana-Org-Id` headers, and CORS responses now set `Vary: Origin`
+- Tool parameters that accept any value now declare an explicit type list in their JSON schema, so MCP clients no longer warn that the schema has no validation keywords ([#1231](https://github.com/grafana/mcp-grafana/pull/1231))
+- Observability providers shut down in parallel, so one slow exporter no longer makes the others time out on shutdown ([#1230](https://github.com/grafana/mcp-grafana/pull/1230))
+
+## [1.6.3] - 2026-09-30
+
+### Fixed
+
+- Prometheus errors other than 400/422 (for example 500s or proxy errors) now include the response body, so failures explain what went wrong instead of only showing the status code ([#1270](https://github.com/grafana/mcp-grafana/pull/1270))
+- Docker images now report the correct release version instead of a build-info fallback ([#1269](https://github.com/grafana/mcp-grafana/pull/1269))
+
+### Security
+
+- Outbound Grafana clients now refuse redirects to a different scheme, host, or port, so Grafana credentials are never forwarded to a redirect target. Use `--allow-cross-origin-redirects` (or `GRAFANA_ALLOW_CROSS_ORIGIN_REDIRECTS=true`) to restore the previous behaviour ([#1268](https://github.com/grafana/mcp-grafana/pull/1268))
+
+## [1.6.2] - 2026-09-29
+
+This is the last 1.x release; the next release will be 2.0.
+
+### Fixed
+
+- Loki log queries now return lines in time order across streams and no longer drop a line at the limit boundary when results span multiple streams ([#1259](https://github.com/grafana/mcp-grafana/pull/1259))
+- Loki and VictoriaLogs query time bounds keep sub-second (up to nanosecond) precision, so narrow windows return results and callers can page by exact log timestamps ([#1260](https://github.com/grafana/mcp-grafana/pull/1260))
+- A configured Grafana URL with a trailing slash no longer produces double-slashed request paths when fetching frontend settings ([#1258](https://github.com/grafana/mcp-grafana/pull/1258))
+- PyPI wheels now compress the bundled binary, shrinking each wheel from about 55MB to about 17MB ([#1257](https://github.com/grafana/mcp-grafana/pull/1257))
+
+## [1.6.1] - 2026-09-27
+
+### Fixed
+
+- The stdio server no longer stops answering requests once a client opens a `subscriptions/listen` stream on protocol `2026-07-28`, which made `tools/list` time out in clients such as Claude Code and GitHub Copilot CLI ([#1236](https://github.com/grafana/mcp-grafana/pull/1236))
+- Blank optional fields in the Claude Desktop extension (MCPB) no longer pass literal `${user_config.*}` placeholders as credentials, so username/password auth works when the service account token field is left empty ([#1249](https://github.com/grafana/mcp-grafana/pull/1249))
+
+## [1.6.0] - 2026-09-25
+
+### Added
+
+- Opt-in per-request Grafana URL selection, with an optional allowlist of permitted URLs and a request-scoped token ([#1242](https://github.com/grafana/mcp-grafana/pull/1242))
+- Opt-in `cloudlogging` tool category for the Google Cloud Logging datasource: `query_cloud_logging` runs Cloud Logging queries, and `list_cloud_logging_projects`, `list_cloud_logging_buckets` and `list_cloud_logging_views` discover what it can read ([#1228](https://github.com/grafana/mcp-grafana/pull/1228))
+- Tempo TraceQL metrics tools now describe the query grammar with a worked example and return correction hints for common PromQL-style mistakes, so agents can fix rejected queries ([#1207](https://github.com/grafana/mcp-grafana/pull/1207))
+
+### Fixed
+
+- `list_prometheus_metric_names` now pushes regex filtering and a result limit to the datasource instead of downloading every metric name, avoiding large memory spikes on datasources with many metrics. `page * limit` must now not exceed 10000 ([#1217](https://github.com/grafana/mcp-grafana/pull/1217))
+- `--base-path` now applies to the streamable HTTP endpoint and works for SSE with or without a trailing slash; `/healthz` and `/metrics` stay at the server root, and invalid or conflicting paths are rejected at startup ([#1033](https://github.com/grafana/mcp-grafana/pull/1033))
+- `query_loki_logs`, `query_loki_stats` and `query_loki_patterns` return `logql is required` for an empty query instead of a Loki parse error. VictoriaLogs stats queries now need an explicit selector (`*` still works) ([#1238](https://github.com/grafana/mcp-grafana/pull/1238))
+- `get_panel_image` now returns the deeplink as structured content, so the panel viewer shows "Open in Grafana" in Claude ([#1240](https://github.com/grafana/mcp-grafana/pull/1240))
+
+## [1.5.1] - 2026-09-17
+
+### Fixed
+
+- `shorten_url` no longer doubles the Grafana sub-path prefix when generating short links on instances served under a sub-path ([#1205](https://github.com/grafana/mcp-grafana/pull/1205))
+- `get_annotation_tags` now accepts `limit` as a number instead of a string, fixing type-mismatch errors from LLM callers ([#1204](https://github.com/grafana/mcp-grafana/pull/1204))
+- Datasource TLS schema fields no longer include PEM placeholder strings that could confuse LLMs into sending literal placeholder text ([#1200](https://github.com/grafana/mcp-grafana/pull/1200))
+
+## [1.5.0] - 2026-09-17
+
+### Added
+
+- Anonymous usage statistics reporting with per-process event unit, configurable via `--usage-stats` / `GRAFANA_USAGE_STATS` (modes: `enabled`, `disabled`, `log`; default disabled). Supports `DO_NOT_TRACK=1`, reports tool call counts and server configuration with no PII, and flushes on a 4-hour interval and at shutdown ([#1188](https://github.com/grafana/mcp-grafana/pull/1188))
+- `UserAgent` field on `GrafanaConfig` for identifying API callers in outbound Grafana requests ([#1187](https://github.com/grafana/mcp-grafana/pull/1187))
+
+### Fixed
+
+- `query_loki_logs` now preserves structured metadata when using the compact output format ([#1196](https://github.com/grafana/mcp-grafana/pull/1196))
+
+### Changed
+
+- Tempo tools now use direct HTTP calls to the Tempo API instead of proxying through an MCP layer, improving reliability and reducing overhead ([#1194](https://github.com/grafana/mcp-grafana/pull/1194))
+
+## [1.4.2] - 2026-09-14
+
+### Added
+
+- Optional `version` parameter on `get_dashboard_by_uid` to retrieve a specific saved version of a dashboard. New `list_dashboard_versions` tool returns version metadata (version number, author, timestamp, message) ([#1158](https://github.com/grafana/mcp-grafana/pull/1158))
+
+### Fixed
+
+- Removed unconditional `tools/list` response field injection (`resultType`, `cacheScope`, `ttlMs`) that broke legacy MCP clients which validate against the base protocol schema ([#1179](https://github.com/grafana/mcp-grafana/pull/1179))
+
+## [1.4.1] - 2026-09-11
+
+### Added
+
+- `labelSelector` parameter on the Sift tools (`find_error_pattern_logs`, `find_slow_requests`), accepting PromQL/LogQL stream selector syntax so investigations can be scoped with regex and negative matchers (e.g. `{namespace=~"prod.*", cluster="us-east-1"}`) rather than exact label equality only. **Breaking:** this replaces the previous required `labels` map parameter on those tools ([#1165](https://github.com/grafana/mcp-grafana/pull/1165))
+
+### Fixed
+
+- `run_panel_query` now routes on the datasource's real type rather than the type recorded in the dashboard panel, so `--loki-enforced-matchers` can no longer be bypassed by a panel that mislabels a Loki datasource ([#1169](https://github.com/grafana/mcp-grafana/pull/1169))
+- The default-organisation warning is no longer logged at startup when dynamic multi-org support is enabled, where a default org is expected to be absent ([#1167](https://github.com/grafana/mcp-grafana/pull/1167))
+
+## [1.4.0] - 2026-09-10
+
+### Added
+
+- Unified SQL datasource tools (`query_athena`, `query_clickhouse`, `query_snowflake`, `query_mssql`, `query_postgresql`) into a shared dialect system, reducing duplication and making it easier to add new SQL datasources ([#1126](https://github.com/grafana/mcp-grafana/pull/1126))
+- `--enable-write-tools` flag to selectively re-enable specific tools under `--disable-write`, so operators can allow individual write tools (e.g. Sift investigation tools) without enabling all writes. `--enable-query` is now shorthand for naming the raw-SQL query tools in this list ([#1157](https://github.com/grafana/mcp-grafana/pull/1157))
+- Optional `folderUid`, `tag`, and `starred` filters on `search_dashboards`, forwarded to Grafana `/api/search`. Empty-query searches now always restrict results to dashboards (`type=dash-db`) ([#1154](https://github.com/grafana/mcp-grafana/pull/1154))
+- Optional `matcher` parameter on `list_loki_label_names` and `list_loki_label_values` to narrow label discovery to a subset of streams (a LogQL stream selector on Loki, LogsQL on VictoriaLogs) ([#1135](https://github.com/grafana/mcp-grafana/pull/1135))
+- `delete_annotation` tool (write-gated) to permanently delete a Grafana annotation by ID, completing the annotation CRUD surface ([#1134](https://github.com/grafana/mcp-grafana/pull/1134))
+- `list_cloudwatch_dimension_values` tool to list the values available for a CloudWatch dimension key, rather than requiring an LLM to guess them ([#1141](https://github.com/grafana/mcp-grafana/pull/1141))
+- `--loki-enforced-matchers`: operator-configured LogQL label matchers AND-ed into every native-Loki query (logs, stats, patterns, and label enumeration) to restrict which streams the server can read. Fails closed on unparseable queries and refuses VictoriaLogs datasources while set. Pair with `--disable-api` so the raw datasource proxy cannot bypass it. A companion `--loki-label-enumeration-fallback` controls label-enumeration behaviour under purely-negative matchers ([#978](https://github.com/grafana/mcp-grafana/pull/978))
+- `--instructions-append` flag to append operator-supplied text to the server instructions returned to MCP clients on initialize, so every connecting agent sees it ([#978](https://github.com/grafana/mcp-grafana/pull/978))
+- Separate `/healthz` listener with its own port, so health checks and Prometheus metrics are served independently of the MCP transport ([#1137](https://github.com/grafana/mcp-grafana/pull/1137))
+
+### Fixed
+
+- `alerting_manage_rules` list operation now applies `search_rule_name` filtering client-side when listing datasource-provisioned rules, which the Grafana ruler API does not filter server-side ([#1161](https://github.com/grafana/mcp-grafana/pull/1161))
+- `tools/list` response now includes `resultType`, `cacheScope`, and `ttlMs` fields for all protocol versions, fixing a `ValidationError` that silently dropped all tools when mcp-grafana was used behind a Python MCP proxy (mcp >= 2.0.0, fastmcp >= 4.0.0) ([#1151](https://github.com/grafana/mcp-grafana/pull/1151))
+- `get_current_oncall_users` now handles user objects (not just ID strings) in the IRM proxy API's `on_call_now` response, fixing empty results on instances using the IRM proxy ([#1150](https://github.com/grafana/mcp-grafana/pull/1150))
+- `--allowed-hosts` is now honored when the request arrives via a loopback reverse proxy, so non-loopback hostnames work behind nginx/Caddy on the same machine ([#1142](https://github.com/grafana/mcp-grafana/pull/1142))
+- `check_datasources_health` no longer reports a frontend-only datasource plugin (e.g. the built-in Alertmanager datasource) as unhealthy; such datasources now report `"status": "UNKNOWN"` and are counted separately in a new `unknown` field ([#1139](https://github.com/grafana/mcp-grafana/pull/1139))
+- Tool calls with a type mismatch (e.g. string where number is expected) now return a structured MCP tool error instead of an opaque internal error ([#1138](https://github.com/grafana/mcp-grafana/pull/1138))
+- Explore deeplinks now use the `panes` format introduced in Grafana 10.2, fixing broken Cloud Monitoring and Loki links caused by lossy migration of the legacy `left` parameter. Falls back to the legacy format for Grafana < 10.2 ([#1088](https://github.com/grafana/mcp-grafana/pull/1088))
+- `query_loki_logs` no longer double-encodes timestamps in stream results ([#982](https://github.com/grafana/mcp-grafana/pull/982))
+
+## [1.3.0] - 2026-08-28
+
+### Added
+
+- Optional per-call `orgId` argument, where applicable, to target a Grafana organization, opt-in via the `--dynamic-multi-org` flag; also discovers proxied datasource tools across every org the credential can access. Tools that address no organization — documentation lookups, local config generation, static query examples — do not advertise it, since selecting one could not change their answer ([#943](https://github.com/grafana/mcp-grafana/pull/943))
+- `user_info` tool reporting the current identity, whether it is a Grafana admin, and the organizations the credential can access (with roles) ([#943](https://github.com/grafana/mcp-grafana/pull/943))
+- Incident custom fields support for creating and updating incidents with user-defined fields ([#1131](https://github.com/grafana/mcp-grafana/pull/1131))
+- Grafana documentation tools backed by `mcp-doc-server` for querying Grafana product documentation ([#1116](https://github.com/grafana/mcp-grafana/pull/1116))
+- `--disable-query` flag to disable all query tools, and raw-SQL query tools (ClickHouse, Snowflake, Athena, MSSQL, PostgreSQL) are now gated behind `--disable-write` by default ([#1085](https://github.com/grafana/mcp-grafana/pull/1085))
+- `grafana_api_request` now supports POST to `/api/ds/query` when query tools are enabled, allowing datasource queries through the generic API tool ([#1125](https://github.com/grafana/mcp-grafana/pull/1125))
+
+### Fixed
+
+- `run_panel_query` now resolves `sqlstring`-type dashboard variables correctly ([#1132](https://github.com/grafana/mcp-grafana/pull/1132))
+- Dashboard tool now describes structured panel targets (e.g. CloudWatch, Elasticsearch) instead of silently dropping them ([#1130](https://github.com/grafana/mcp-grafana/pull/1130))
+- Proxied tools close non-published MCP clients before signaling readiness, preventing resource leaks during tool discovery ([#1128](https://github.com/grafana/mcp-grafana/pull/1128))
+
+### Changed
+
+- `get_panel_image` no longer declares its own `orgId` argument, using the per-call `orgId` injected into the native tools where an organization applies instead. The argument is therefore only advertised with `--dynamic-multi-org`, and without that flag a call passing `orgId` is rejected as an unknown argument. Renders still scope the organization with `targetOrgId` rather than `orgId`, so they do not change the user's active organization, and an organization fixed by `GRAFANA_ORG_ID` or the `X-Grafana-Org-Id` header now sets `targetOrgId` too.
+- `get_panel_image` returns the dashboard deeplink only when it would open in the organization the image was rendered from, which now also accounts for an organization fixed on the connection rather than passed per call. A link cannot carry an organization safely — `?orgId=N` is intercepted by Grafana's `OrgRedirect` middleware, which persists the switch onto the viewer's user record — so for any other organization the image is returned without a deeplink (and without the MCP Apps panel-viewer fallback) rather than with one that can resolve to a different dashboard of the same UID.
+
+## [1.2.0] - 2026-08-25
+
+### Added
+
+- `alerting_manage_silences` tool (opt-in, read/write-gated) to list, create, and expire Grafana alert silences ([#991](https://github.com/grafana/mcp-grafana/pull/991))
+- `update_incident` tool to update fields on an existing incident ([#1080](https://github.com/grafana/mcp-grafana/pull/1080))
+- `update_alert_group` tool to acknowledge and resolve Grafana OnCall alert groups ([#1083](https://github.com/grafana/mcp-grafana/pull/1083))
+- `get_alert_group` now returns the last alert payload for the group, so callers can inspect the triggering alert without a second lookup ([#1081](https://github.com/grafana/mcp-grafana/pull/1081))
+- Agent Observability `agento11y_manage_experiments` and `agento11y_manage_test_suites` tools, in the opt-in `agento11y` category ([#1062](https://github.com/grafana/mcp-grafana/pull/1062))
+- Compact output format for `query_loki_logs`, reducing token usage for large log result sets ([#990](https://github.com/grafana/mcp-grafana/pull/990))
+- Opt-in Loki query cost guardrail for `query_loki_logs` (`--loki-guardrail-mode` / `GRAFANA_LOKI_GUARDRAIL_MODE`, `off` by default, with `shadow` and `enforce` modes). Because Loki query cost is bytes *scanned* — determined only by the stream selector and time range, not line filters — the guardrail requires a selective stream selector, caps the time range (`--loki-guardrail-max-range`, default 24h), and pre-checks Loki's `index/stats` byte estimate against a budget (`--loki-guardrail-max-bytes`, default 100GiB). Blocked queries return an MCP tool error with rewrite guidance; unparseable queries fail open ([#1031](https://github.com/grafana/mcp-grafana/pull/1031))
+- OpenTelemetry counters recording Loki cost-guardrail decisions (allowed, blocked, failed-open), so operators can observe the guardrail's impact ([#1095](https://github.com/grafana/mcp-grafana/pull/1095))
+- `run_panel_query` now supports PostgreSQL ([#1112](https://github.com/grafana/mcp-grafana/pull/1112)) and MSSQL ([#1042](https://github.com/grafana/mcp-grafana/pull/1042)) datasources
+- Datasource resolution falls back to `/api/frontend/settings` when the datasource metadata API is forbidden, so tools keep working on instances that restrict it ([#1015](https://github.com/grafana/mcp-grafana/pull/1015))
+- `GrafanaVersion(ctx)` exposes the targeted Grafana version to tools, so they can gate behaviour on it instead of inferring capability from API versions ([#1091](https://github.com/grafana/mcp-grafana/pull/1091))
+- Optional `orgId` parameter on `get_panel_image` to render a panel for a specific organisation ([#903](https://github.com/grafana/mcp-grafana/pull/903))
+- `list_datasources` now supports filtering by name ([#973](https://github.com/grafana/mcp-grafana/pull/973))
+- `--server-name` flag (and `GRAFANA_MCP_SERVER_NAME` env var) to set a custom MCP server name in the handshake and OTel `service.name`, so operators can distinguish multiple instances ([#1011](https://github.com/grafana/mcp-grafana/pull/1011))
+- Scoped SOCKS5 egress proxy via `GRAFANA_SOCKS5_PROXY`, routing outbound Grafana traffic through a SOCKS5 proxy ([#1119](https://github.com/grafana/mcp-grafana/pull/1119))
+- An MCP Bundle (`.mcpb`) for Claude Desktop is now built and attached on release ([#1077](https://github.com/grafana/mcp-grafana/pull/1077))
+
+### Changed
+
+- Bumped `mcp-go` from v0.55.0 to v0.58.0, picking up fixes for tool-filter scans on the `tools/call` hot path, raw JSON preservation for tool arguments and `structuredContent`, schema tags on nested fields, multi-line SSE `data` fields, and HEAD requests returning 200. This also inherits mcp-go's new default-on DNS rebinding protection, which returns 403 when a request arrives over a loopback connection with a non-loopback `Host` header — a second check underneath `DNSRebindingProtectionMiddleware` that `--allowed-hosts` cannot loosen. Default deployments are unaffected, since `DefaultAllowedHosts` already restricts `Host` to loopback variants; operators who widen `--allowed-hosts` while a same-host reverse proxy forwards over loopback preserving a non-localhost `Host` should configure the proxy to rewrite `Host` to localhost ([#1097](https://github.com/grafana/mcp-grafana/pull/1097))
+- `tools.Stats.Bytes` is now `int64` (was `int`) so index/stats byte counts cannot overflow on 32-bit platforms; Go API consumers of the exported struct may need a cast ([#1031](https://github.com/grafana/mcp-grafana/pull/1031))
+- `/api/frontend/settings` is now fetched once per Grafana instance instead of up to three times. The public URL, the Grafana version and the dashboard namespace previously each fetched that endpoint behind a cache of their own, even though a single response carries all three fields. `mcpgrafana.GrafanaClient` gains a `Version` field populated by the same request that populates `PublicURL`, and `mcpgrafana.GrafanaVersion` prefers it, so a tool holding a client reads the version with no HTTP request at all — previously it cost a blocking round trip on a detached context the caller could not cancel. The namespace keeps a separate org-keyed cache, because Grafana computes it for the requesting org and a URL-keyed entry would serve one org another org's namespace. Failed fetches are still retried rather than cached, but a *successful* fetch that simply omits `buildInfo` is now cached instead of being refetched on every call ([#1115](https://github.com/grafana/mcp-grafana/pull/1115))
+
+### Fixed
+
+- Closed two gaps in the `GRAFANA_SOCKS5_PROXY` egress guarantee. The `install_plugin` and `search_plugin_information` tools reached the grafana.com plugin catalog via `http.DefaultClient`, bypassing the configured SOCKS5 proxy entirely; these requests now route through the proxy (carrying no Grafana credentials or forwarded headers) and fail closed when it is misconfigured. `NewGrafanaClient` now installs a fail-closed transport instead of panicking when the proxy cannot be applied, matching the OnCall and incident paths, and the per-call fail-closed logic is centralised in one helper ([#1121](https://github.com/grafana/mcp-grafana/pull/1121))
+- `observability.ToolMetricDimensions` now bounds the `mcp.tool.phase` metric label against the `toolMetricDims` allowlist, like `mcp.tool.operation` and `mcp.tool.resource_type`. Phase is read from a tool result's `_meta`, and results proxied from an MCP-enabled datasource come from a remote server rather than from this repo, so the label was unbounded-cardinality in the general case. A tool that does not opt into `phases` now contributes no phase, and an opted-in tool reporting an unexpected value reports `other`. Behaviour is unchanged for every in-tree tool: `create_datasource` is the only producer, with `schema` and `created` ([#1094](https://github.com/grafana/mcp-grafana/issues/1094))
+- Distributed traces are no longer broken over the HTTP transports: the server now installs a global OTel `TextMapPropagator` (via `autoprop`, honouring `OTEL_PROPAGATORS`, default `tracecontext,baggage`), so an inbound `traceparent` continues the caller's trace and outbound Grafana API requests carry one of their own. Previously every hop started a disconnected trace. Trace context forwarded via `GRAFANA_FORWARD_HEADERS` no longer overrides the propagated value, which would have cut mcp-grafana out of the middle of the trace ([#1084](https://github.com/grafana/mcp-grafana/issues/1084))
+- Grafana-managed alert rule UIDs are recovered from the internal `__alert_rule_uid__` / `__alert_rule_namespace_uid__` labels when older Grafana responses omit the top-level UID fields; those internal labels are stripped from the returned summary so they don't surface as user labels ([#968](https://github.com/grafana/mcp-grafana/pull/968))
+- Alert rule matchers are now encoded in the JSON shape Grafana expects, fixing rule create/update requests that Grafana previously rejected ([#1111](https://github.com/grafana/mcp-grafana/pull/1111))
+- `run_panel_query` now resolves constant and textbox dashboard variables from their query field, so panels using them return correct results ([#1041](https://github.com/grafana/mcp-grafana/pull/1041))
+- Datasource queries fall back to the legacy proxy on a `401`, restoring queries against datasources the metadata proxy rejects ([#1022](https://github.com/grafana/mcp-grafana/pull/1022))
+- URL shortening for navigation deeplinks now sends a relative path, fixing link generation on some deployments ([#974](https://github.com/grafana/mcp-grafana/pull/974))
+- `GRAFANA_URL` is normalized where it enters the process (trailing slash trimmed, missing scheme supplied), so the config, API client, and client-cache key all agree on the target. Previously a schemeless value such as `127.0.0.1:3000` could panic at startup or produce hostless requests ([#1034](https://github.com/grafana/mcp-grafana/pull/1034))
+- Proxied tools auto-wire `SetToolManager` and report a clearer error when the tool manager is nil ([#1102](https://github.com/grafana/mcp-grafana/pull/1102))
+- The session wait when building a proxied tool set is now bounded, so a slow or unavailable datasource can no longer hang tool discovery ([#1087](https://github.com/grafana/mcp-grafana/pull/1087))
+- Transient proxied-tool discovery/connect failures are retried and connections are established in parallel, making proxied tool startup faster and more resilient ([#1071](https://github.com/grafana/mcp-grafana/pull/1071))
+- The client cache and session OTel meters are now injectable, so embedders can supply their own instrumentation ([#1073](https://github.com/grafana/mcp-grafana/pull/1073))
+
+## [1.1.0] - 2026-08-10
+
+### Added
+
+- Optional bearer-token caller authentication for the SSE and streamable-http transports via `--server-auth-token` / `MCP_GRAFANA_SERVER_TOKEN`. When set, callers must present `Authorization: Bearer <token>` and unauthenticated requests are rejected with `401` before any tool runs. Caller authentication is enforced only when a token is configured; when it isn't, a non-loopback bind still starts but logs a security error at startup ([#1059](https://github.com/grafana/mcp-grafana/pull/1059), [#1060](https://github.com/grafana/mcp-grafana/pull/1060))
+- `ask_assistant` tool (opt-in, write-gated) for asking Grafana Assistant open-ended questions and getting a full text reply ([#1026](https://github.com/grafana/mcp-grafana/pull/1026))
+- Agent Observability tool `agento11y_manage_test_suites`, in the opt-in `agento11y` category. Reads cover the test suites that offline experiments run against, one suite with its full version history, and the test cases of one version. The write operations (create and update a suite; open a draft version; publish it; upsert and delete a test case) need `grafana-agento11y-app.eval:write` and are registered only when write tools are enabled. `upsert_test_case` replaces the whole case rather than merging into it, and a published version rejects every edit, so changing a published suite means opening a new draft
+- Agent Observability tool `agento11y_manage_experiments`, in the opt-in `agento11y` category. Reads cover the experiment list and filter facets, one experiment with its headline result, a per-test-case report, an experiment's trials and scores, and one trial with its scores and artifact metadata. `get_report` is trimmed to `row_limit` rows (default 50, max 500) because the route is not paginated upstream and nests every test case input, score, and artifact record. The write operations (`update` and `cancel`) need `grafana-agento11y-app.eval:write` and are registered only when write tools are enabled. Creating experiments and trials is not exposed: the plugin proxy blocks those routes
+- Agent Observability tool `agento11y_manage_agents`, in the opt-in `agento11y` category. Read-only: `list` for the agent catalog, `get` for one agent version in full (system prompt, tools, models), `list_versions` for an agent's version history, and `list_version_scores` for evaluation score aggregates per version. Needs `grafana-agento11y-app.data:read` and is registered whether or not write tools are enabled ([#1036](https://github.com/grafana/mcp-grafana/pull/1036))
+- Agent Observability tool `agento11y_manage_eval_collections`, in the opt-in `agento11y` category. Reads cover saved conversations, the collections that group them, and the membership in both directions. The write operations (bookmark and delete a saved conversation; create, update, and delete a collection; add and remove collection members) need `grafana-agento11y-app.eval:write` and are registered only when write tools are enabled ([#1035](https://github.com/grafana/mcp-grafana/pull/1035))
+- Agent Observability eval control-plane tools `agento11y_manage_evaluators` and `agento11y_manage_eval_rules`, in the opt-in `agento11y` category. Reads cover evaluators, evaluator templates, template versions, the judge provider and model catalog, eval rules, and guards. The write operations (evaluator upsert, fork, test, and delete; rule and guard create, update, preview, and delete) need `grafana-agento11y-app.eval:write` and are registered only when write tools are enabled ([#1028](https://github.com/grafana/mcp-grafana/pull/1028))
+- CLI flags to include tool arguments in OpenTelemetry spans and to configure the Grafana client request timeout ([#1023](https://github.com/grafana/mcp-grafana/pull/1023))
+
+### Fixed
+
+- Declare `readOnly`/`destructive`/`openWorld` hints on every tool ([#1051](https://github.com/grafana/mcp-grafana/pull/1051))
+- Proxied-tools memory scaling with session count and unbounded per-session tool-store growth ([#1001](https://github.com/grafana/mcp-grafana/pull/1001))
+- Restrict the Prometheus backend to known Prometheus-compatible datasource types ([#1006](https://github.com/grafana/mcp-grafana/pull/1006))
+- Respect `OTEL_LOGS_EXPORTER=none` to disable OTLP log export ([#1012](https://github.com/grafana/mcp-grafana/pull/1012))
+- A `GRAFANA_URL` without a scheme is normalized where it enters the process, so the API client and the client cache resolve the same instance as the rest of the server. `GRAFANA_URL=127.0.0.1:3000` used to panic at startup, and a schemeless hostname produced requests with no host while tools built from `GrafanaConfig.URL` kept working ([#1034](https://github.com/grafana/mcp-grafana/pull/1034))
+
+### Changed
+
+- Enrich telemetry to include more tool dimensions ([#1016](https://github.com/grafana/mcp-grafana/pull/1016))
+- `query_pyroscope` now returns a per-function table (`pprof -top` style: flat/cum per fully-qualified function name) by default instead of a line-level DOT call graph. The DOT call graph remains available via `format="dot"` and no longer deletes the `other` truncation node ([#1025](https://github.com/grafana/mcp-grafana/pull/1025))
+
+### Removed
+
+- Support for the undocumented `X-Grafana-URL` header ([#1052](https://github.com/grafana/mcp-grafana/pull/1052))
+
+## [1.0.0] - 2026-07-28
+
+### Added
+
+- Agent Observability tools: `agento11y_manage_conversations` and `agento11y_manage_generations` in a new `agento11y` category, excluded from the default tool set ([#944](https://github.com/grafana/mcp-grafana/pull/944))
+- Inline panel viewer for `get_panel_image` on [MCP Apps](https://modelcontextprotocol.io/)-aware hosts, with a dashboard deeplink fallback for other hosts. The deeplink text content is tagged with `_meta.ui.kind = "deeplink"` so viewers can locate it structurally instead of by string matching ([#882](https://github.com/grafana/mcp-grafana/pull/882))
+
+### Fixed
+
+- Enable OTLP trace export with the signal-specific `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` environment variable, so operators can ship traces without also exporting logs; the generic `OTEL_EXPORTER_OTLP_ENDPOINT` still enables both signals ([#1004](https://github.com/grafana/mcp-grafana/pull/1004))
+
+### Changed
+
+- Tool calls with unknown argument keys are now rejected with an error naming the unknown keys and listing the valid ones, instead of silently ignoring them and answering from default values ([#997](https://github.com/grafana/mcp-grafana/pull/997))
+
+## [0.17.2] - 2026-07-13
+
+### Security
+
+- Bind environment-configured credentials to the configured Grafana URL. A URL supplied in the `X-Grafana-URL` request header no longer causes the environment service-account token, deprecated API key, basic auth, or extra headers to be sent to a caller-specified host ([#XXX](https://github.com/grafana/mcp-grafana/pull/XXX))
+
+## [0.17.1] - 2026-07-07
+
+### Fixed
+
+- Send the relative path (rather than an absolute URL) to the short-urls API when generating navigation deeplinks ([#976](https://github.com/grafana/mcp-grafana/pull/976))
+
+### Security
+
+- Block DNS rebinding attacks on the HTTP and SSE transports ([#957](https://github.com/grafana/mcp-grafana/pull/957))
+
+## [0.17.0] - 2026-06-23
+
+### Added
+
+- Datasource management tools for creating and updating datasources via the MCP server, gated behind write tools, with schema-guided configuration that follows each datasource type's JSON schema and excludes sensitive credential fields ([#939](https://github.com/grafana/mcp-grafana/pull/939))
+
+### Fixed
+
+- Recognize the Athena plugin's `rawSQL` query field when extracting dashboard panel queries ([#956](https://github.com/grafana/mcp-grafana/pull/956))
+
 ## [0.16.0] - 2026-06-16
 
 ### Added
@@ -287,6 +594,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Upgrade Docker base image packages to resolve critical OpenSSL CVE-2025-15467 (CVSS 9.8) ([#551](https://github.com/grafana/mcp-grafana/pull/551))
 
+[2.0.2]: https://github.com/grafana/mcp-grafana/compare/v2.0.1...v2.0.2
+[2.0.1]: https://github.com/grafana/mcp-grafana/compare/v2.0.0...v2.0.1
+[2.0.0]: https://github.com/grafana/mcp-grafana/compare/v1.6.3...v2.0.0
+[1.6.3]: https://github.com/grafana/mcp-grafana/compare/v1.6.2...v1.6.3
+[1.6.2]: https://github.com/grafana/mcp-grafana/compare/v1.6.1...v1.6.2
+[1.6.1]: https://github.com/grafana/mcp-grafana/compare/v1.6.0...v1.6.1
+[1.6.0]: https://github.com/grafana/mcp-grafana/compare/v1.5.1...v1.6.0
+[1.5.1]: https://github.com/grafana/mcp-grafana/compare/v1.5.0...v1.5.1
+[1.5.0]: https://github.com/grafana/mcp-grafana/compare/v1.4.2...v1.5.0
+[1.4.2]: https://github.com/grafana/mcp-grafana/compare/v1.4.1...v1.4.2
+[1.4.1]: https://github.com/grafana/mcp-grafana/compare/v1.4.0...v1.4.1
+[1.4.0]: https://github.com/grafana/mcp-grafana/compare/v1.3.0...v1.4.0
+[1.3.0]: https://github.com/grafana/mcp-grafana/compare/v1.2.0...v1.3.0
+[1.2.0]: https://github.com/grafana/mcp-grafana/compare/v1.1.0...v1.2.0
+[1.1.0]: https://github.com/grafana/mcp-grafana/compare/v1.0.0...v1.1.0
+[1.0.0]: https://github.com/grafana/mcp-grafana/compare/v0.17.2...v1.0.0
+[0.17.2]: https://github.com/grafana/mcp-grafana/compare/v0.17.1...v0.17.2
+[0.17.1]: https://github.com/grafana/mcp-grafana/compare/v0.17.0...v0.17.1
+[0.17.0]: https://github.com/grafana/mcp-grafana/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/grafana/mcp-grafana/compare/v0.15.2...v0.16.0
 [0.15.2]: https://github.com/grafana/mcp-grafana/compare/v0.15.1...v0.15.2
 [0.15.1]: https://github.com/grafana/mcp-grafana/compare/v0.15.0...v0.15.1

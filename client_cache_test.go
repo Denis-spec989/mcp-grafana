@@ -1,6 +1,8 @@
 package mcpgrafana
 
 import (
+	"context"
+	"net/http"
 	"net/url"
 	"sync"
 	"testing"
@@ -8,6 +10,8 @@ import (
 	"github.com/grafana/incident-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
 func TestClientCache_GrafanaClient(t *testing.T) {
@@ -171,4 +175,76 @@ func TestClientCache_Close(t *testing.T) {
 	g, i, _ = cache.Size()
 	assert.Equal(t, 0, g)
 	assert.Equal(t, 0, i)
+}
+
+// TestClientCache_MetricsUseInjectedMeterProvider verifies that
+// WithClientCacheMeterProvider routes the cache's instruments to the given
+// provider instead of the (possibly noop) global one, so metrics reach a
+// scrapeable registry in deployments that reset otel.GetMeterProvider() for
+// reasons unrelated to mcp-grafana (see issue #1072).
+type closeCountingTransport struct {
+	http.RoundTripper
+	closed int
+}
+
+func (t *closeCountingTransport) CloseIdleConnections() { t.closed++ }
+
+func TestClientCache_EvictsLeastRecentlyUsed(t *testing.T) {
+	cache := NewClientCache(nil)
+	defer cache.Close()
+
+	keyFor := func(i int) clientCacheKey {
+		return clientCacheKey{url: "http://localhost:3000", orgID: int64(i)}
+	}
+
+	first := &closeCountingTransport{}
+	cache.GetOrCreateIncidentClient(keyFor(0), func() *incident.Client {
+		return &incident.Client{HTTPClient: &http.Client{Transport: first}}
+	})
+	for i := 0; i <= clientCacheMaxSize; i++ {
+		cache.GetOrCreateGrafanaClient(keyFor(i), func() *GrafanaClient { return &GrafanaClient{} })
+	}
+	for i := 1; i <= clientCacheMaxSize; i++ {
+		cache.GetOrCreateIncidentClient(keyFor(i), func() *incident.Client { return &incident.Client{} })
+	}
+
+	grafana, incidentCount, _ := cache.Size()
+	assert.Equal(t, clientCacheMaxSize, grafana)
+	assert.Equal(t, clientCacheMaxSize, incidentCount)
+	assert.Equal(t, 1, first.closed, "evicted incident client should have idle connections closed")
+
+	// The oldest Grafana client was evicted and is recreated on the next lookup.
+	created := false
+	cache.GetOrCreateGrafanaClient(keyFor(0), func() *GrafanaClient { created = true; return &GrafanaClient{} })
+	assert.True(t, created)
+}
+
+func TestClientCache_MetricsUseInjectedMeterProvider(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+
+	cache := NewClientCache(nil, WithClientCacheMeterProvider(provider))
+	defer cache.Close()
+
+	key := clientCacheKey{url: "http://localhost:3000", apiKey: "key", orgID: 1}
+	cache.GetOrCreateGrafanaClient(key, func() *GrafanaClient {
+		return &GrafanaClient{}
+	})
+	// Second lookup for the same key should record a hit.
+	cache.GetOrCreateGrafanaClient(key, func() *GrafanaClient {
+		return &GrafanaClient{}
+	})
+
+	var data metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &data))
+	require.Len(t, data.ScopeMetrics, 1)
+
+	names := make(map[string]bool)
+	for _, m := range data.ScopeMetrics[0].Metrics {
+		names[m.Name] = true
+	}
+	assert.True(t, names["mcp.client_cache.lookups"])
+	assert.True(t, names["mcp.client_cache.hits"])
+	assert.True(t, names["mcp.client_cache.misses"])
+	assert.True(t, names["mcp.client_cache.size"])
 }

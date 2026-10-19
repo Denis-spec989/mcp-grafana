@@ -10,7 +10,7 @@ import (
 	"net/url"
 	"strings"
 
-	mcpgrafana "github.com/grafana/mcp-grafana"
+	mcpgrafana "github.com/grafana/mcp-grafana/v2"
 )
 
 // IRM plugin proxy paths. The proxy prepends "api/internal/v1/" before forwarding.
@@ -292,6 +292,32 @@ func proxyGetAlertGroup(ctx context.Context, id string) (*OnCallAlertGroup, erro
 	return internal.toOnCallAlertGroup(), nil
 }
 
+// proxyUpdateAlertGroup posts an alert group state action through the IRM
+// plugin proxy. It is the OBO counterpart to amixrUpdateAlertGroup.
+func proxyUpdateAlertGroup(ctx context.Context, id, action string) error {
+	client, err := newOncallProxyClient(ctx)
+	if err != nil {
+		return fmt.Errorf("creating proxy client: %w", err)
+	}
+
+	path := fmt.Sprintf(
+		"%s%s/%s/",
+		proxyAlertGroupsPath,
+		url.PathEscape(id),
+		url.PathEscape(action),
+	)
+	resp, err := client.doRequest(ctx, http.MethodPost, path, nil)
+	if err != nil {
+		return fmt.Errorf("%s alert group %s: %w", action, id, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return fmt.Errorf("%s alert group %s: %w", action, id, handleProxyErrorResponse(resp))
+	}
+	return nil
+}
+
 func proxyListSchedules(ctx context.Context, args ListOnCallSchedulesParams) ([]*ScheduleSummary, error) {
 	client, err := newOncallProxyClient(ctx)
 	if err != nil {
@@ -473,7 +499,8 @@ func proxyGetCurrentOnCallUsers(ctx context.Context, scheduleID string) (*Curren
 }
 
 // extractUserIDs extracts user ID strings from the on_call_now field,
-// which can be []string or []any depending on the API.
+// which can be []string or []any depending on the API. Each []any entry may
+// itself be a plain ID string or a user object with a "pk" field.
 func extractUserIDs(onCallNow any) []string {
 	switch v := onCallNow.(type) {
 	case []string:
@@ -481,8 +508,13 @@ func extractUserIDs(onCallNow any) []string {
 	case []any:
 		ids := make([]string, 0, len(v))
 		for _, item := range v {
-			if s, ok := item.(string); ok {
-				ids = append(ids, s)
+			switch t := item.(type) {
+			case string:
+				ids = append(ids, t)
+			case map[string]any:
+				if pk, ok := t["pk"].(string); ok {
+					ids = append(ids, pk)
+				}
 			}
 		}
 		return ids

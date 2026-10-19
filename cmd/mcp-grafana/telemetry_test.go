@@ -22,7 +22,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -69,7 +68,7 @@ func TestNoRemoteTelemetryProcess(t *testing.T) {
 			cmd := exec.CommandContext(ctx, binary,
 				"--transport", "stdio", "--enabled-tools", "navigation,api", "--disable-proxied",
 				"--debug", "--log-level", "debug", "--slow-request-threshold", "1ns",
-				"--metrics", "--address", serverAddr, "--metrics-address", metricsAddr)
+				"--metrics", "--address", serverAddr, "--metrics-address", metricsAddr, "--usage-stats", "enabled")
 			cmd.Env = telemetryProcessEnv(grafana.URL, collector, mode)
 			var stderr bytes.Buffer
 			cmd.Stderr = &stderr
@@ -125,7 +124,7 @@ func TestNoRemoteTelemetryProcess(t *testing.T) {
 				}
 			}
 			request(1, "initialize", map[string]any{
-				"protocolVersion": mcp.LATEST_PROTOCOL_VERSION,
+				"protocolVersion": "2025-11-25",
 				"capabilities":    map[string]any{},
 				"clientInfo":      map[string]string{"name": "privacy-test", "version": "1"},
 			})
@@ -254,6 +253,7 @@ func telemetryProcessEnv(grafanaURL, collector, mode string) []string {
 		}
 	}
 	env = append(env, "GRAFANA_URL="+grafanaURL, "GRAFANA_SERVICE_ACCOUNT_TOKEN=privacy-test-token",
+		"GRAFANA_USAGE_STATS=enabled", "GRAFANA_USAGE_STATS_ENDPOINT="+collector,
 		"GOTELEMETRY=off", "OTEL_TRACES_EXPORTER=otlp", "OTEL_LOGS_EXPORTER=otlp", "OTEL_METRICS_EXPORTER=otlp",
 		"OTEL_TRACES_SAMPLER=always_on", "OTEL_BSP_SCHEDULE_DELAY=1", "OTEL_BLRP_SCHEDULE_DELAY=1")
 	if mode == "invalid" {

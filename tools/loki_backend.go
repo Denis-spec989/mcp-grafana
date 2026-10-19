@@ -3,6 +3,9 @@ package tools
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/grafana/grafana-openapi-client-go/models"
@@ -18,12 +21,16 @@ import (
 // into the shared LogEntry shape.
 type lokiBackend interface {
 	// ListLabelNames returns the available label/field names within the
-	// given time range. Empty start/end means "use server defaults".
-	ListLabelNames(ctx context.Context, start, end time.Time) ([]string, error)
+	// given time range. Empty start/end means "use server defaults". An
+	// empty matcher means "no filter"; a non-empty matcher narrows the
+	// search to streams selected by it (Loki: a LogQL stream selector,
+	// e.g. `{namespace="prod"}`; VictoriaLogs: a LogsQL filter).
+	ListLabelNames(ctx context.Context, matcher string, start, end time.Time) ([]string, error)
 
 	// ListLabelValues returns the values for a single label/field within
-	// the given time range.
-	ListLabelValues(ctx context.Context, labelName string, start, end time.Time) ([]string, error)
+	// the given time range, optionally narrowed to streams selected by
+	// matcher (see ListLabelNames).
+	ListLabelValues(ctx context.Context, labelName, matcher string, start, end time.Time) ([]string, error)
 
 	// QueryLogs runs a log/metric query and returns the raw entries plus
 	// the result type ("streams" | "vector" | "matrix") and (when known)
@@ -72,6 +79,13 @@ func lokiBackendForDatasource(ctx context.Context, uid string) (lokiBackend, err
 
 	switch ds.Type {
 	case victoriaLogsDatasourceType:
+		// Enforced label matchers are expressed in LogQL and can only be
+		// injected into native-Loki queries. VictoriaLogs uses LogsQL, which
+		// we cannot safely rewrite, so fail closed rather than serve an
+		// unfiltered path around the enforcement policy.
+		if len(enforcedMatchers(ctx)) > 0 {
+			return nil, fmt.Errorf("loki label-matcher enforcement is enabled but datasource %q is VictoriaLogs (LogsQL); refusing to query it because the enforced matchers cannot be applied", uid)
+		}
 		return newVictoriaLogsBackend(ctx, uid, ds)
 	default:
 		return newLokiNativeBackend(ctx, uid, ds)
@@ -95,21 +109,33 @@ func formatRFC3339OrEmpty(t time.Time) string {
 	if t.IsZero() {
 		return ""
 	}
-	return t.Format(time.RFC3339)
+	return t.Format(time.RFC3339Nano)
 }
 
-func (b *lokiNativeBackend) ListLabelNames(ctx context.Context, start, end time.Time) ([]string, error) {
-	return b.client.fetchData(ctx, "/loki/api/v1/labels", formatRFC3339OrEmpty(start), formatRFC3339OrEmpty(end))
+func (b *lokiNativeBackend) ListLabelNames(ctx context.Context, matcher string, start, end time.Time) ([]string, error) {
+	query, err := labelEnumerationQuery(ctx, matcher)
+	if err != nil {
+		return nil, err
+	}
+	return b.client.fetchData(ctx, "/loki/api/v1/labels", query, formatRFC3339OrEmpty(start), formatRFC3339OrEmpty(end))
 }
 
-func (b *lokiNativeBackend) ListLabelValues(ctx context.Context, labelName string, start, end time.Time) ([]string, error) {
+func (b *lokiNativeBackend) ListLabelValues(ctx context.Context, labelName, matcher string, start, end time.Time) ([]string, error) {
 	urlPath := fmt.Sprintf("/loki/api/v1/label/%s/values", labelName)
-	return b.client.fetchData(ctx, urlPath, formatRFC3339OrEmpty(start), formatRFC3339OrEmpty(end))
+	query, err := labelEnumerationQuery(ctx, matcher)
+	if err != nil {
+		return nil, err
+	}
+	return b.client.fetchData(ctx, urlPath, query, formatRFC3339OrEmpty(start), formatRFC3339OrEmpty(end))
 }
 
 func (b *lokiNativeBackend) QueryLogs(ctx context.Context, p lokiQueryParams) (*lokiQueryResult, error) {
+	enforcedQuery, err := enforceLogQL(ctx, p.Query)
+	if err != nil {
+		return nil, err
+	}
 	response, err := b.client.fetchQuery(ctx, fetchQueryParams{
-		Query:       p.Query,
+		Query:       enforcedQuery,
 		QueryType:   p.QueryType,
 		Start:       formatRFC3339OrEmpty(p.Start),
 		End:         formatRFC3339OrEmpty(p.End),
@@ -124,6 +150,32 @@ func (b *lokiNativeBackend) QueryLogs(ctx context.Context, p lokiQueryParams) (*
 	entries, err := parseLokiQueryResponse(response)
 	if err != nil {
 		return nil, err
+	}
+	// Loki groups results by stream, so flattening does not preserve global time order.
+	// Sort before queryLokiLogs trims the page to the requested limit.
+	if response.Data.ResultType == "streams" {
+		type timedEntry struct {
+			log       LogEntry
+			timestamp int64
+		}
+		ordered := make([]timedEntry, len(entries))
+		for i, entry := range entries {
+			timestamp, err := strconv.ParseInt(entry.Timestamp, 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("invalid Loki stream timestamp %q: %w", entry.Timestamp, err)
+			}
+			ordered[i] = timedEntry{log: entry, timestamp: timestamp}
+		}
+		forward := strings.EqualFold(p.Direction, "forward")
+		sort.SliceStable(ordered, func(i, j int) bool {
+			if forward {
+				return ordered[i].timestamp < ordered[j].timestamp
+			}
+			return ordered[i].timestamp > ordered[j].timestamp
+		})
+		for i, entry := range ordered {
+			entries[i] = entry.log
+		}
 	}
 
 	var linesScanned *int
@@ -140,9 +192,17 @@ func (b *lokiNativeBackend) QueryLogs(ctx context.Context, p lokiQueryParams) (*
 }
 
 func (b *lokiNativeBackend) QueryStats(ctx context.Context, query string, start, end time.Time) (*Stats, error) {
-	return b.client.fetchStats(ctx, query, formatRFC3339OrEmpty(start), formatRFC3339OrEmpty(end))
+	enforcedQuery, err := enforceLogQL(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	return b.client.fetchStats(ctx, enforcedQuery, formatRFC3339OrEmpty(start), formatRFC3339OrEmpty(end))
 }
 
 func (b *lokiNativeBackend) QueryPatterns(ctx context.Context, query, step string, start, end time.Time) ([]Pattern, error) {
-	return b.client.fetchPatterns(ctx, query, formatRFC3339OrEmpty(start), formatRFC3339OrEmpty(end), step)
+	enforcedQuery, err := enforceLogQL(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	return b.client.fetchPatterns(ctx, enforcedQuery, formatRFC3339OrEmpty(start), formatRFC3339OrEmpty(end), step)
 }
